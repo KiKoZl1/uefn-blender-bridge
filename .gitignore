@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+
+# Bridge artifacts
+*.fbx
+materials.json
+UEFNBlenderBridge/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Build / release
+release/*.zip
+dist/
+build/
+
+# Logs
+*.log

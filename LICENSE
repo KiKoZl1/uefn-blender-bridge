@@ -1,0 +1,76 @@
+UEFN Blender Bridge — Source Available License v1.0
+Copyright (c) 2026 KiKoZl / Surprise Co. (surpriseugc.com)
+
+All rights reserved.
+
+This software is made available as "source available" — the source code is
+public for transparency, learning, and personal use. It is NOT open source
+under the OSI definition, and it is NOT free for commercial redistribution.
+
+==========================================================================
+1. PERMITTED USE
+==========================================================================
+
+You are free to:
+
+  (a) Download, install, and use this software on your personal machines.
+  (b) Use this software in commercial projects you build with UEFN/Fortnite
+      (e.g. Fortnite islands, UGC content, contracted client work).
+  (c) Read, study, and modify the source code for your own private use.
+  (d) Report bugs, request features, and contribute fixes via Pull Requests
+      to the official repository.
+
+==========================================================================
+2. PROHIBITED USE
+==========================================================================
+
+You may NOT, without prior written permission from the copyright holder:
+
+  (a) Redistribute this software, in whole or in part, in source or compiled
+      form, on any platform (GitHub, marketplaces, file hosts, Discord,
+      torrent, etc.), free or paid.
+  (b) Sell, sublicense, or charge any fee for access to this software or any
+      derivative work of it.
+  (c) Bundle this software with another product, addon, plugin, or asset
+      pack and distribute the bundle.
+  (d) Remove, alter, or obscure copyright notices, author credits, or this
+      license text.
+  (e) Publish modified versions of this software under a different name as
+      if they were your own work.
+  (f) Use the names "UEFN Blender Bridge", "Surprise Co.", "KiKoZl", or any
+      associated branding to endorse or promote derivative works without
+      written permission.
+
+==========================================================================
+3. CONTRIBUTIONS
+==========================================================================
+
+By submitting a Pull Request, issue, or any other contribution to this
+project, you agree that your contribution may be incorporated into the
+software under this same license, and you grant the copyright holder a
+perpetual, worldwide, royalty-free license to use, modify, and distribute
+your contribution as part of this project.
+
+==========================================================================
+4. NO WARRANTY
+==========================================================================
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING
+FROM, OUT OF, OR IN CONNECTION WITH THIS SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THIS SOFTWARE.
+
+This is BETA software. Use it on backed-up projects only. Loss of data,
+broken scenes, or corrupted UEFN levels are possible. You assume all risk.
+
+==========================================================================
+5. CONTACT
+==========================================================================
+
+For commercial licensing, redistribution permission, or partnership
+inquiries, contact: surpriseugc.com
+
+Repository: https://github.com/KiKoZl1/uefn-blender-bridge
