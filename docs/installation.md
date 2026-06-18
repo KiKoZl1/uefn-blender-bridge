@@ -11,7 +11,7 @@ same machine.
 | | Minimum | Tested |
 |---|---|---|
 | **Blender** | 3.6 LTS | 3.6, 4.0, 4.2 |
-| **UEFN** | 30.x | 30.x |
+| **UEFN** | 40.00+ (Python era) | 41.10 (latest) |
 | **OS** | Windows 10 | Windows 11 |
 | **Python** | (bundled) | Blender 3.10+, Unreal 3.11 |
 

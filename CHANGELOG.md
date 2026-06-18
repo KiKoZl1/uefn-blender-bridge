@@ -49,7 +49,7 @@ First public early-access release.
 
 ### Notes
 
-- Tested on: Blender 3.6 / 4.x, UEFN 30.x, Windows 11
+- Tested on: Blender 3.6 / 4.x, UEFN 41.10 (latest), Windows 11
 - Not tested on: macOS, Linux
 
 ---
