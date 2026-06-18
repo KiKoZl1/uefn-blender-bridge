@@ -903,21 +903,28 @@ def _export_fbx(selected_only=False):
     if not any(obj.select_get() for obj in bpy.context.scene.objects):
         return None
 
-    # Auto-apply rotation & scale before export
-    if bpy.context.scene.uefn_bridge.auto_apply_transforms:
-        targets = [o for o in bpy.context.scene.objects if o.select_get() and o.type == "MESH"]
-        _apply_rotation_scale(targets)
-
-    # Zero out locations before export so FBX vertices stay in local space.
-    # UEFN's FBX importer bakes node transforms into mesh vertices when
-    # combine_meshes=False, which breaks pivot alignment. By exporting at
-    # origin, the mesh stays centered on its pivot. set_actor_location
-    # handles world positioning on the UEFN side.
+    # Export PURE LOCAL geometry: temporarily reset each object's transform to identity
+    # so the FBX node carries NO location/rotation/scale. Otherwise UEFN bakes the node
+    # transform into the mesh AND the actor transform we apply on the UEFN side would
+    # DOUBLE it (the "tiny + rotated + far apart" bug). World placement is done by the
+    # UEFN side via set_actor_* using the transforms captured in `objects` earlier.
     selected_meshes = [o for o in bpy.context.scene.objects
                        if o.select_get() and o.type == "MESH"]
-    saved_locations = {o.name: o.location.copy() for o in selected_meshes}
+    saved = {}
     for o in selected_meshes:
+        saved[o.name] = (o.location.copy(), o.rotation_euler.copy(),
+                         o.rotation_quaternion.copy(), o.scale.copy(), o.rotation_mode)
         o.location = (0.0, 0.0, 0.0)
+        o.rotation_euler = (0.0, 0.0, 0.0)
+        o.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+        o.scale = (1.0, 1.0, 1.0)
+
+    def _restore():
+        for o in selected_meshes:
+            if o.name in saved:
+                loc, eul, quat, scl, mode = saved[o.name]
+                o.location, o.rotation_euler, o.rotation_quaternion, o.scale = loc, eul, quat, scl
+                o.rotation_mode = mode
 
     try:
         for area in bpy.context.screen.areas:
@@ -926,24 +933,22 @@ def _export_fbx(selected_only=False):
                     bpy.ops.export_scene.fbx(
                         filepath=filepath,
                         use_selection=True,
+                        global_scale=1.0,
+                        apply_unit_scale=True,
                         apply_scale_options="FBX_SCALE_ALL",
-                        bake_space_transform=True,
+                        axis_forward="-Z", axis_up="Y",
+                        use_space_transform=True,
+                        bake_space_transform=False,
                         mesh_smooth_type="FACE",
                         use_mesh_modifiers=True,
                         add_leaf_bones=False,
                         path_mode="COPY",
                         embed_textures=False,
                     )
-                # Restore locations
-                for o in selected_meshes:
-                    if o.name in saved_locations:
-                        o.location = saved_locations[o.name]
+                _restore()
                 return filepath
     finally:
-        # Always restore even if export fails
-        for o in selected_meshes:
-            if o.name in saved_locations:
-                o.location = saved_locations[o.name]
+        _restore()
 
     return None
 
@@ -975,21 +980,26 @@ def _export_fbx_objects(obj_names):
         obj.select_set(True)
         bpy.context.view_layer.objects.active = obj
 
-        # Apply rotation & scale if enabled
-        if bpy.context.scene.uefn_bridge.auto_apply_transforms:
-            _apply_rotation_scale([obj])
-
-        # Zero location for local-space vertices
-        saved_loc = obj.location.copy()
+        # Export PURE LOCAL geometry — reset the object transform to identity so the
+        # FBX node carries no transform (the UEFN actor applies the world transform).
+        saved = (obj.location.copy(), obj.rotation_euler.copy(),
+                 obj.rotation_quaternion.copy(), obj.scale.copy(), obj.rotation_mode)
         obj.location = (0.0, 0.0, 0.0)
+        obj.rotation_euler = (0.0, 0.0, 0.0)
+        obj.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+        obj.scale = (1.0, 1.0, 1.0)
 
         try:
             with bpy.context.temp_override(area=area_3d):
                 bpy.ops.export_scene.fbx(
                     filepath=filepath,
                     use_selection=True,
+                    global_scale=1.0,
+                    apply_unit_scale=True,
                     apply_scale_options="FBX_SCALE_ALL",
-                    bake_space_transform=True,
+                    axis_forward="-Z", axis_up="Y",
+                    use_space_transform=True,
+                    bake_space_transform=False,
                     mesh_smooth_type="FACE",
                     use_mesh_modifiers=True,
                     add_leaf_bones=False,
@@ -1000,7 +1010,7 @@ def _export_fbx_objects(obj_names):
         except Exception as e:
             _err(f"FBX export failed for {name}: {e}")
         finally:
-            obj.location = saved_loc
+            obj.location, obj.rotation_euler, obj.rotation_quaternion, obj.scale, obj.rotation_mode = saved
 
     return results
 
