@@ -849,10 +849,9 @@ def _import_scene_cmd(fbx_path="", scene_name="Scene", objects=None,
     # Place meshes
     actors = _place_meshes(mesh_paths, obj_data, scene_name)
 
-    # Apply materials
-    if created_mats and actors:
-        first_mat = list(created_mats.values())[0]
-        _apply_material_to_actors(actors, first_mat)
+    # Materials come from the FBX import itself (embed_textures=True on the Blender side
+    # → UEFN auto-builds a PBR material per mesh, reused by name). We intentionally do NOT
+    # override that with a single material here (that was the "first material on all" bug).
 
     # Save state
     channels = set()
@@ -936,10 +935,9 @@ def _import_baked_cmd(fbx_path="", scene_name="Scene", objects=None,
     # Place meshes
     actors = _place_meshes(mesh_paths, obj_data, scene_name)
 
-    # Apply materials
-    if created_mats and actors:
-        first_mat = list(created_mats.values())[0]
-        _apply_material_to_actors(actors, first_mat)
+    # Materials come from the FBX import itself (embed_textures=True on the Blender side
+    # → UEFN auto-builds a PBR material per mesh, reused by name). We intentionally do NOT
+    # override that with a single material here (that was the "first material on all" bug).
 
     _imported_scenes[scene_name] = {
         "actors": len(actors),

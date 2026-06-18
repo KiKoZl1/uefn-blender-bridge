@@ -943,7 +943,7 @@ def _export_fbx(selected_only=False):
                         use_mesh_modifiers=True,
                         add_leaf_bones=False,
                         path_mode="COPY",
-                        embed_textures=False,
+                        embed_textures=True,
                     )
                 _restore()
                 return filepath
