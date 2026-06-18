@@ -12,6 +12,7 @@ import bpy
 import hashlib
 import json
 import math
+import mathutils
 import os
 import queue as _queue_mod
 import struct
@@ -22,6 +23,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 from bpy.app.handlers import persistent
+
+from . import coords  # pure Blender<->UEFN convention (single source, unit-tested)
 
 # ============================================================
 # CONFIG
@@ -217,20 +220,13 @@ def _apply_incoming_transforms(params):
             ue_rot = od.get("rotation", [0, 0, 0])  # [Pitch, Yaw, Roll]
             ue_scale = od.get("scale", [1, 1, 1])
 
-            # Reverse: UE → Blender
-            obj.location.x = ue_loc[0] / 100.0
-            obj.location.y = -ue_loc[1] / 100.0
-            obj.location.z = ue_loc[2] / 100.0
-
-            # Pitch=-deg(ry), Yaw=-deg(rz), Roll=+deg(rx)  →  reverse
-            pitch, yaw, roll = ue_rot[0], ue_rot[1], ue_rot[2]
-            obj.rotation_euler.x = math.radians(roll)
-            obj.rotation_euler.y = -math.radians(pitch)
-            obj.rotation_euler.z = -math.radians(yaw)
-
-            obj.scale.x = ue_scale[0]
-            obj.scale.y = ue_scale[1]
-            obj.scale.z = ue_scale[2]
+            # Reverse UE → Blender into a WORLD matrix (single-source convention).
+            # matrix_world handles parenting (parent-inverse) and any rotation_mode
+            # (euler / quaternion / axis-angle) correctly — unlike writing local fields.
+            loc = mathutils.Vector(coords.loc_ue_to_bl(*ue_loc))
+            eul = mathutils.Euler(coords.rot_ue_to_bl(*ue_rot), "XYZ")
+            scl = mathutils.Vector((ue_scale[0], ue_scale[1], ue_scale[2]))
+            obj.matrix_world = mathutils.Matrix.LocRotScale(loc, eul, scl)
             updated += 1
 
         # Update snapshot to prevent re-sync loop
@@ -1100,11 +1096,7 @@ def _obj_data(objects):
 
     The FBX pipeline handles axis reorientation for mesh vertices.
     World coordinates only need the handedness flip (negate Y).
-    Based on xavier150/Blender-For-UnrealEngine-Addons (proven mapping).
-
-    Position:  UE.X = BL.X*100,  UE.Y = -BL.Y*100,  UE.Z = BL.Z*100
-    Rotation:  Pitch = -deg(ry),  Yaw = -deg(rz),    Roll = deg(rx)
-    Scale:     No swap needed (FBX handles axis reorientation)
+    The convention lives in coords.py (single source, unit-tested).
     """
     result = []
     for o in objects:
@@ -1115,16 +1107,8 @@ def _obj_data(objects):
         result.append({
             "name": o.name,
             "collection": _get_collection_path(o),
-            "location": [
-                loc.x * 100.0,         # UE.X = BL.X (no swap)
-                -loc.y * 100.0,        # UE.Y = -BL.Y (handedness flip)
-                loc.z * 100.0,         # UE.Z = BL.Z
-            ],
-            "rotation": [
-                -math.degrees(rot.y),  # Pitch = -BL.ry
-                -math.degrees(rot.z),  # Yaw   = -BL.rz
-                math.degrees(rot.x),   # Roll  = +BL.rx
-            ],
+            "location": coords.loc_bl_to_ue(loc.x, loc.y, loc.z),
+            "rotation": coords.rot_bl_to_ue(rot.x, rot.y, rot.z),
             "scale": [sc.x, sc.y, sc.z],
         })
     return result

@@ -18,4 +18,7 @@ jobs:
           python -m py_compile \
             BlenderAddon/uefn_bridge/__init__.py \
             BlenderAddon/uefn_bridge/bridge.py \
+            BlenderAddon/uefn_bridge/coords.py \
             UEFNPlugin/uefn_blender_bridge.py
+      - name: unit tests (pure functions, no Blender)
+        run: python tests/test_coords.py
