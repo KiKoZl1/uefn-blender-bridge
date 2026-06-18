@@ -1246,8 +1246,11 @@ def do_send_selected():
     # Capture world transforms BEFORE export (export may modify them)
     obj_payload = _obj_data(selected)
 
+    # Scope textures + material metadata to the SELECTION (B4) — not the whole scene.
+    obj_names = [o.name for o in selected]
     _clean_exchange()
-    _export_textures()
+    tex_paths = _export_textures_for_objects(obj_names)
+    _export_material_info_for_objects(obj_names, tex_paths)
 
     orig_mode = bpy.context.mode
     if orig_mode != "OBJECT":
