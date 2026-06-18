@@ -1769,22 +1769,6 @@ class UEFNBridgeProperties(bpy.types.PropertyGroup):
         max=65535,
         description="UEFN bridge server port",
     )
-    tool_category: bpy.props.EnumProperty(
-        name="Tools",
-        items=[
-            ("ENVIRONMENT", "Environment Tools",
-             "Mesh sync, materials, transforms, live sync"),
-        ],
-        default="ENVIRONMENT",
-        description="Active tool category",
-    )
-    sync_interval: bpy.props.FloatProperty(
-        name="Interval (s)",
-        default=2.0,
-        min=0.5,
-        max=30.0,
-        description="Live sync check interval in seconds",
-    )
     bake_resolution: bpy.props.IntProperty(
         name="Resolution",
         default=1024,
@@ -1852,11 +1836,6 @@ class UEFNBRIDGE_PT_main(bpy.types.Panel):
         if _st.send_count > 0:
             box.label(text=f"Total syncs: {_st.send_count}", icon="RECOVER_LAST")
 
-        # Category selector (visible when connected)
-        if _st.connected:
-            layout.separator()
-            layout.prop(props, "tool_category", text="")
-
 
 class UEFNBRIDGE_PT_connection(bpy.types.Panel):
     bl_label = "Connection"
@@ -1890,8 +1869,7 @@ class UEFNBRIDGE_PT_export(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return (_st.connected
-                and context.scene.uefn_bridge.tool_category == "ENVIRONMENT")
+        return _st.connected
 
     def draw(self, context):
         layout = self.layout
@@ -1917,8 +1895,7 @@ class UEFNBRIDGE_PT_bake(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return (_st.connected
-                and context.scene.uefn_bridge.tool_category == "ENVIRONMENT")
+        return _st.connected
 
     def draw(self, context):
         layout = self.layout
@@ -1945,8 +1922,7 @@ class UEFNBRIDGE_PT_live(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return (_st.connected
-                and context.scene.uefn_bridge.tool_category == "ENVIRONMENT")
+        return _st.connected
 
     def draw(self, context):
         layout = self.layout
@@ -1978,8 +1954,8 @@ class UEFNBRIDGE_PT_info(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="UEFN Blender Bridge v1.0")
-        layout.label(text="by KiKoZl  |  Surprise Co.")
+        layout.label(text=f"UEFN Blender Bridge v{ADDON_VERSION}")
+        layout.label(text="by KiKoZl - Surprise Co.")
 
         op = layout.operator("uefn_bridge.open_url", text="GitHub", icon="URL")
         op.url = "https://github.com/KiKoZl1"
