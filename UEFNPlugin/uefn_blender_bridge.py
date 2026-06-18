@@ -324,7 +324,9 @@ def _spawn_at_camera():
 def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
     asub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     actors = []
-    spawn_pos = _spawn_at_camera()
+    # The bridge always sends per-object world transforms — spawn at origin and apply
+    # them below. NO camera offset (that was placing everything in front of the camera).
+    spawn_pos = unreal.Vector(0, 0, 0)
 
     # Build lookup: FBX-style name (dots→underscores) → object data
     obj_by_fbx = {}
@@ -353,35 +355,40 @@ def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
                 _log(f"  Spawn failed: {path}", "warning")
                 continue
 
-            # Match by NAME: extract asset name from path, match to Blender object
+            # Match by NAME: extract asset name from path, match to Blender object.
             asset_name = str(path).split("/")[-1].split(".")[0]
             od = obj_by_fbx.get(asset_name)
-            bname = od.get("name", "") if od else ""
+            # Fallback: a single imported mesh maps to the single sent object even when
+            # the asset name differs (e.g. a combined export named "scene").
+            if od is None and object_data and len(object_data) == 1:
+                od = object_data[0]
 
+            bname = od.get("name", "") if od else ""
             label = f"{ACTOR_PREFIX}{bname}" if bname else f"{ACTOR_PREFIX}{actor.get_name()}"
             actor.set_actor_label(label)
 
-            # Apply transforms (already converted to UE coords by Blender)
+            # Apply the per-object WORLD transform Blender sent (already in UE coords).
+            # Placement must mirror the Blender position — never a camera offset.
             if od:
                 loc = od.get("location", [0, 0, 0])
-                rot = od.get("rotation", [0, 0, 0])
+                rot = od.get("rotation", [0, 0, 0])   # [pitch, yaw, roll]
                 scale = od.get("scale", [1, 1, 1])
 
                 actor.set_actor_location(
                     unreal.Vector(loc[0], loc[1], loc[2]), False, False)
                 actor.set_actor_rotation(
-                    unreal.Rotator(rot[0], rot[1], rot[2]), False)
+                    unreal.Rotator(pitch=rot[0], yaw=rot[1], roll=rot[2]), False)
                 actor.set_actor_scale3d(
                     unreal.Vector(scale[0], scale[1], scale[2]))
 
-                # Organize in World Outliner by Blender collection
                 collection = od.get("collection", "")
-                if collection:
-                    actor.set_folder_path(f"/BlenderBridge/{collection}")
-                else:
-                    actor.set_folder_path("/BlenderBridge")
+                actor.set_folder_path(
+                    f"/BlenderBridge/{collection}" if collection else "/BlenderBridge")
             else:
-                _log(f"  No match for asset '{asset_name}'", "warning")
+                # Merged / unknown mesh with no single match — keep at origin (deterministic),
+                # never floating in front of the camera.
+                _log(f"  No per-object match for '{asset_name}' — placed at origin", "warning")
+                actor.set_actor_location(unreal.Vector(0, 0, 0), False, False)
                 actor.set_folder_path("/BlenderBridge")
 
             actors.append(actor)

@@ -1774,8 +1774,9 @@ class UEFNBridgeProperties(bpy.types.PropertyGroup):
     )
     combine_meshes: bpy.props.BoolProperty(
         name="Combine Meshes",
-        default=True,
-        description="Combine all meshes into one on import (uncheck to keep separate)",
+        default=False,
+        description="Merge the selection into ONE static mesh on import. Off (default) "
+                    "keeps objects separate so each lands at its own Blender position.",
     )
     auto_apply_transforms: bpy.props.BoolProperty(
         name="Apply Rotation & Scale",
