@@ -1004,7 +1004,7 @@ def _export_fbx_objects(obj_names):
                     use_mesh_modifiers=True,
                     add_leaf_bones=False,
                     path_mode="COPY",
-                    embed_textures=False,
+                    embed_textures=True,
                 )
             results[name] = filepath
         except Exception as e:
