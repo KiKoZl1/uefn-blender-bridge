@@ -934,10 +934,10 @@ def _export_fbx(selected_only=False):
                     bpy.ops.export_scene.fbx(
                         filepath=filepath,
                         use_selection=True,
-                        global_scale=1.0,
-                        apply_unit_scale=True,
-                        apply_scale_options="FBX_SCALE_ALL",
-                        axis_forward="-Z", axis_up="Y",
+                        global_scale=100.0,           # bake m->cm INTO the FBX (import-agnostic)
+                        apply_unit_scale=False,
+                        apply_scale_options="FBX_SCALE_NONE",
+                        axis_forward="X", axis_up="Z",  # bake Z-up INTO the FBX (stands upright)
                         use_space_transform=True,
                         bake_space_transform=False,
                         mesh_smooth_type="FACE",
@@ -995,10 +995,10 @@ def _export_fbx_objects(obj_names):
                 bpy.ops.export_scene.fbx(
                     filepath=filepath,
                     use_selection=True,
-                    global_scale=1.0,
-                    apply_unit_scale=True,
-                    apply_scale_options="FBX_SCALE_ALL",
-                    axis_forward="-Z", axis_up="Y",
+                    global_scale=100.0,           # bake m->cm INTO the FBX (import-agnostic)
+                    apply_unit_scale=False,
+                    apply_scale_options="FBX_SCALE_NONE",
+                    axis_forward="X", axis_up="Z",  # bake Z-up INTO the FBX (stands upright)
                     use_space_transform=True,
                     bake_space_transform=False,
                     mesh_smooth_type="FACE",

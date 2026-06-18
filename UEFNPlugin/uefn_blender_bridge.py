@@ -275,8 +275,10 @@ def _import_fbx(fbx_path, dest_path, combine=False):
     sm = options.get_editor_property("static_mesh_import_data")
     sm.set_editor_property("combine_meshes", combine)
     sm.set_editor_property("auto_generate_collision", _auto_collision)
-    sm.set_editor_property("convert_scene", True)
-    sm.set_editor_property("convert_scene_unit", True)
+    # No conversions on import — the FBX is already baked to cm + Z-up on export, so this
+    # works whether UEFN honors these flags (legacy FBX) or ignores them (Interchange).
+    sm.set_editor_property("convert_scene", False)
+    sm.set_editor_property("convert_scene_unit", False)
 
     task.set_editor_property("options", options)
     unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
