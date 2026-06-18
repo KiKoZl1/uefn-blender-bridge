@@ -321,12 +321,19 @@ def _spawn_at_camera():
         return unreal.Vector(0, 0, 0)
 
 
+def _find_actor_by_label(asub, label):
+    for a in asub.get_all_level_actors():
+        try:
+            if a.get_actor_label() == label:
+                return a
+        except Exception:
+            pass
+    return None
+
+
 def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
     asub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     actors = []
-    # The bridge always sends per-object world transforms — spawn at origin and apply
-    # them below. NO camera offset (that was placing everything in front of the camera).
-    spawn_pos = unreal.Vector(0, 0, 0)
 
     # Build lookup: FBX-style name (dots→underscores) → object data
     obj_by_fbx = {}
@@ -350,12 +357,8 @@ def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
                 _log(f"  Not StaticMesh: {path} ({type(asset).__name__})", "warning")
                 continue
 
-            actor = asub.spawn_actor_from_object(asset, spawn_pos)
-            if not actor:
-                _log(f"  Spawn failed: {path}", "warning")
-                continue
-
-            # Match by NAME: extract asset name from path, match to Blender object.
+            # Resolve target object + label BEFORE spawning, so we can REUSE an existing
+            # bridge actor instead of creating a duplicate (idempotent — F-44).
             asset_name = str(path).split("/")[-1].split(".")[0]
             od = obj_by_fbx.get(asset_name)
             # Fallback: a single imported mesh maps to the single sent object even when
@@ -363,9 +366,23 @@ def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
             if od is None and object_data and len(object_data) == 1:
                 od = object_data[0]
 
-            bname = od.get("name", "") if od else ""
-            label = f"{ACTOR_PREFIX}{bname}" if bname else f"{ACTOR_PREFIX}{actor.get_name()}"
-            actor.set_actor_label(label)
+            bname = od.get("name", "") if od else asset_name
+            label = f"{ACTOR_PREFIX}{bname}"
+
+            existing = _find_actor_by_label(asub, label)
+            if existing:
+                comp = existing.static_mesh_component
+                if comp:
+                    comp.set_static_mesh(asset)
+                actor = existing
+                reused = True
+            else:
+                actor = asub.spawn_actor_from_object(asset, unreal.Vector(0, 0, 0))
+                if not actor:
+                    _log(f"  Spawn failed: {path}", "warning")
+                    continue
+                actor.set_actor_label(label)
+                reused = False
 
             # Apply the per-object WORLD transform Blender sent (already in UE coords).
             # Placement must mirror the Blender position — never a camera offset.
@@ -384,15 +401,14 @@ def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
                 collection = od.get("collection", "")
                 actor.set_folder_path(
                     f"/BlenderBridge/{collection}" if collection else "/BlenderBridge")
-            else:
-                # Merged / unknown mesh with no single match — keep at origin (deterministic),
-                # never floating in front of the camera.
+            elif not reused:
+                # Unmatched NEW mesh — keep at origin (deterministic), never camera offset.
                 _log(f"  No per-object match for '{asset_name}' — placed at origin", "warning")
                 actor.set_actor_location(unreal.Vector(0, 0, 0), False, False)
                 actor.set_folder_path("/BlenderBridge")
 
             actors.append(actor)
-            _log(f"Placed: {label} (mesh: {asset_name})")
+            _log(f"{'Updated' if reused else 'Placed'}: {label} (mesh: {asset_name})")
 
         except Exception as e:
             _log(f"Place error: {e}", "warning")
