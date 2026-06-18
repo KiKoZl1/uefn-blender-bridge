@@ -19,6 +19,7 @@ import struct
 import tempfile
 import threading
 import time
+import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.error import URLError
@@ -1114,8 +1115,16 @@ def _obj_data(objects):
         loc, rot_q, sc = mw.decompose()
         rot = rot_q.to_euler('XYZ')
 
+        # Stable identity that survives rename/duplicate (B3): a GUID stored as a custom
+        # property on the object, mirrored to a tag on the UEFN actor.
+        guid = o.get("bb_guid")
+        if not guid:
+            guid = uuid.uuid4().hex
+            o["bb_guid"] = guid
+
         result.append({
             "name": o.name,
+            "guid": guid,
             "collection": _get_collection_path(o),
             "location": coords.loc_bl_to_ue(loc.x, loc.y, loc.z),
             "rotation": coords.rot_bl_to_ue(rot.x, rot.y, rot.z),

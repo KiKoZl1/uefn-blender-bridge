@@ -331,6 +331,35 @@ def _find_actor_by_label(asub, label):
     return None
 
 
+def _find_actor_by_guid(asub, guid):
+    needle = f"BB_GUID:{guid}"
+    for a in asub.get_all_level_actors():
+        try:
+            if any(str(t) == needle for t in a.tags):
+                return a
+        except Exception:
+            pass
+    return None
+
+
+def _ensure_sm_name(asset, base):
+    """Rename an imported StaticMesh to the UE convention SM_<base> (F-43), reusing an
+    existing SM_ asset of that name if present (mesh dedup — F-44). Falls back safely."""
+    try:
+        pkg = asset.get_path_name().split(".")[0]
+        folder, cur = pkg.rsplit("/", 1)
+        if cur.startswith("SM_"):
+            return asset
+        new_pkg = f"{folder}/SM_{base}"
+        if unreal.EditorAssetLibrary.does_asset_exist(new_pkg):
+            return unreal.EditorAssetLibrary.load_asset(new_pkg) or asset
+        if unreal.EditorAssetLibrary.rename_asset(pkg, new_pkg):
+            return unreal.EditorAssetLibrary.load_asset(new_pkg) or asset
+    except Exception as e:
+        _log(f"  SM_ rename skipped for {base}: {e}", "warning")
+    return asset
+
+
 def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
     asub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     actors = []
@@ -367,9 +396,16 @@ def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
                 od = object_data[0]
 
             bname = od.get("name", "") if od else asset_name
+            guid = od.get("guid", "") if od else ""
             label = f"{ACTOR_PREFIX}{bname}"
 
-            existing = _find_actor_by_label(asub, label)
+            # UE naming convention on the mesh asset (F-43): SM_<name>, reusing an
+            # existing SM_ asset of the same name when present (mesh dedup — F-44).
+            asset = _ensure_sm_name(asset, bname.replace(".", "_"))
+
+            # Match an existing actor by GUID first (survives rename), then by label (B3).
+            existing = (_find_actor_by_guid(asub, guid) if guid else None) \
+                or _find_actor_by_label(asub, label)
             if existing:
                 comp = existing.static_mesh_component
                 if comp:
@@ -381,8 +417,10 @@ def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
                 if not actor:
                     _log(f"  Spawn failed: {path}", "warning")
                     continue
-                actor.set_actor_label(label)
                 reused = False
+            actor.set_actor_label(label)
+            if guid:
+                actor.tags = [unreal.Name(f"BB_GUID:{guid}")]
 
             # Apply the per-object WORLD transform Blender sent (already in UE coords).
             # Placement must mirror the Blender position — never a camera offset.
