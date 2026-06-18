@@ -1509,7 +1509,7 @@ def do_clean_all():
     if not _st.connected:
         return False
     try:
-        r = _send("clean_all")
+        r = _send("clean_all", {"confirm": True})
         c = r.get("cleaned", 0)
         _st.status = f"Cleaned {c} actors"
         _log(f"Clean all: {c} actors")
@@ -1709,6 +1709,10 @@ class UEFNBRIDGE_OT_clean(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         return _st.connected
+
+    def invoke(self, context, event):
+        # Destructive (hard-deletes BB_ actors + imported assets in UEFN) — confirm first.
+        return context.window_manager.invoke_confirm(self, event)
 
     def execute(self, context):
         do_clean_all()

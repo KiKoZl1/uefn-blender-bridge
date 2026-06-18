@@ -1344,6 +1344,8 @@ def _push_transforms_to_blender_cmd(**kw):
 
 @_reg("clean_all")
 def _clean_all_cmd(**kw):
+    if not kw.get("confirm"):
+        return {"error": "clean_all requires confirm=True (destructive: deletes BB_ actors + imported assets)"}
     count = _cleanup_actors()
     # Clean assets from THIS session's imports (Meshes, Materials, Textures)
     cleaned_folders = []
@@ -1364,6 +1366,9 @@ def _clean_all_cmd(**kw):
 
 @_reg("execute_python")
 def _exec_py(code=""):
+    # Disabled by default — power-user/debug hook. Opt in with env BB_ENABLE_EXEC=1.
+    if os.environ.get("BB_ENABLE_EXEC") != "1":
+        return {"error": "execute_python is disabled (set BB_ENABLE_EXEC=1 to enable)"}
     out, err = io.StringIO(), io.StringIO()
     old = sys.stdout, sys.stderr
     g = {"__builtins__": __builtins__, "unreal": unreal, "result": None}
@@ -1386,7 +1391,6 @@ class _H(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(b)))
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(b)
 
@@ -1436,16 +1440,12 @@ class _H(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(b)))
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(b)
 
     def do_OPTIONS(self):
-        self.send_response(200)
-        for h, v in [("Access-Control-Allow-Origin", "*"),
-                      ("Access-Control-Allow-Methods", "GET,POST,OPTIONS"),
-                      ("Access-Control-Allow-Headers", "Content-Type")]:
-            self.send_header(h, v)
+        # No CORS — loopback-only; the legitimate client is Blender (urllib), not a browser.
+        self.send_response(204)
         self.end_headers()
 
     def _e(self, c, m):
@@ -1867,9 +1867,8 @@ class Dashboard:
                         res = _dispatch(cmd, par)
                         resp = {"success": True, "result": _serialize(res)}
                     except Exception as e:
-                        _log(f"'{cmd}' failed: {e}", "error")
-                        resp = {"success": False, "error": str(e),
-                                "traceback": traceback.format_exc()}
+                        _log(f"'{cmd}' failed: {e}\n{traceback.format_exc()}", "error")
+                        resp = {"success": False, "error": str(e)}
                     with _responses_lock:
                         _responses[rid] = resp
                     n += 1
