@@ -279,6 +279,13 @@ def _obj_geometry_hash(obj):
         eo.to_mesh_clear()
     except Exception:
         pass
+    # Rotation is BAKED into the exported geometry, so a rotation change must trigger a
+    # full re-export (not a transform-only fast update). Fold it into the geometry hash.
+    try:
+        q = obj.matrix_basis.to_quaternion()
+        h.update(struct.pack("4f", q.w, q.x, q.y, q.z))
+    except Exception:
+        pass
     return h.hexdigest()
 
 
@@ -323,13 +330,12 @@ def _obj_texture_hash(obj):
 
 
 def _obj_transform_hash(obj):
-    """Hash a single object's transform (location, rotation, scale) + collection."""
+    """Hash a single object's LOCATION + SCALE + collection — the actor-applied parts that
+    can be fast-updated. Rotation is intentionally EXCLUDED (it is baked into the geometry,
+    so it lives in _obj_geometry_hash and a rotation change re-exports instead)."""
     h = hashlib.md5()
-    loc, rot, sc = obj.location, obj.rotation_euler, obj.scale
-    h.update(struct.pack("9f",
-             loc.x, loc.y, loc.z,
-             rot.x, rot.y, rot.z,
-             sc.x, sc.y, sc.z))
+    loc, sc = obj.location, obj.scale
+    h.update(struct.pack("6f", loc.x, loc.y, loc.z, sc.x, sc.y, sc.z))
     h.update(_get_collection_path(obj).encode())
     return h.hexdigest()
 
