@@ -279,13 +279,6 @@ def _obj_geometry_hash(obj):
         eo.to_mesh_clear()
     except Exception:
         pass
-    # Rotation is BAKED into the exported geometry, so a rotation change must trigger a
-    # full re-export (not a transform-only fast update). Fold it into the geometry hash.
-    try:
-        q = obj.matrix_basis.to_quaternion()
-        h.update(struct.pack("4f", q.w, q.x, q.y, q.z))
-    except Exception:
-        pass
     return h.hexdigest()
 
 
@@ -330,12 +323,11 @@ def _obj_texture_hash(obj):
 
 
 def _obj_transform_hash(obj):
-    """Hash a single object's LOCATION + SCALE + collection — the actor-applied parts that
-    can be fast-updated. Rotation is intentionally EXCLUDED (it is baked into the geometry,
-    so it lives in _obj_geometry_hash and a rotation change re-exports instead)."""
+    """Hash a single object's transform (location, rotation, scale) + collection. All three
+    are actor-applied (data-driven), so any transform change is a FAST update — no re-export."""
     h = hashlib.md5()
-    loc, sc = obj.location, obj.scale
-    h.update(struct.pack("6f", loc.x, loc.y, loc.z, sc.x, sc.y, sc.z))
+    loc, rot, sc = obj.location, obj.rotation_euler, obj.scale
+    h.update(struct.pack("9f", loc.x, loc.y, loc.z, rot.x, rot.y, rot.z, sc.x, sc.y, sc.z))
     h.update(_get_collection_path(obj).encode())
     return h.hexdigest()
 
@@ -918,16 +910,19 @@ def _export_fbx(selected_only=False):
                        if o.select_get() and o.type == "MESH"]
     saved = {}
     for o in selected_meshes:
-        saved[o.name] = (o.location.copy(), o.scale.copy())
+        saved[o.name] = (o.location.copy(), o.rotation_euler.copy(),
+                         o.rotation_quaternion.copy(), o.scale.copy(), o.rotation_mode)
         o.location = (0.0, 0.0, 0.0)
+        o.rotation_euler = (0.0, 0.0, 0.0)
+        o.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
         o.scale = (1.0, 1.0, 1.0)
 
     def _restore():
         for o in selected_meshes:
             if o.name in saved:
-                loc, scl = saved[o.name]
-                o.location = loc
-                o.scale = scl
+                loc, eul, quat, scl, mode = saved[o.name]
+                o.location, o.rotation_euler, o.rotation_quaternion, o.scale = loc, eul, quat, scl
+                o.rotation_mode = mode
 
     try:
         for area in bpy.context.screen.areas:
@@ -983,10 +978,13 @@ def _export_fbx_objects(obj_names):
         obj.select_set(True)
         bpy.context.view_layer.objects.active = obj
 
-        # Zero only LOCATION and SCALE; KEEP rotation so intentional rotations are carried
-        # in the geometry (actor uses identity rotation — applied exactly once).
-        saved = (obj.location.copy(), obj.scale.copy())
+        # DATA-DRIVEN: export clean local geometry (zero the object transform); the actor
+        # carries the world rotation/scale/location.
+        saved = (obj.location.copy(), obj.rotation_euler.copy(),
+                 obj.rotation_quaternion.copy(), obj.scale.copy(), obj.rotation_mode)
         obj.location = (0.0, 0.0, 0.0)
+        obj.rotation_euler = (0.0, 0.0, 0.0)
+        obj.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
         obj.scale = (1.0, 1.0, 1.0)
 
         try:
@@ -1010,7 +1008,7 @@ def _export_fbx_objects(obj_names):
         except Exception as e:
             _err(f"FBX export failed for {name}: {e}")
         finally:
-            obj.location, obj.scale = saved
+            obj.location, obj.rotation_euler, obj.rotation_quaternion, obj.scale, obj.rotation_mode = saved
 
     return results
 
@@ -1126,11 +1124,9 @@ def _obj_data(objects):
             "guid": guid,
             "collection": _get_collection_path(o),
             "location": coords.loc_bl_to_ue(loc.x, loc.y, loc.z),
-            # The mesh is exported with the object rotation zeroed (local geometry, which
-            # imports UPRIGHT). The object's world rotation must NOT be re-applied on the
-            # actor or it double-counts and tips the mesh over. Verified vs UEFN LUF +
-            # observed data: actor rotation must be identity. (coords.rot_* still used inbound.)
-            "rotation": [0.0, 0.0, 0.0],
+            # DATA-DRIVEN: mesh is exported clean (no baked rotation), the actor carries the
+            # full world rotation. This conversion is the CALIBRATION TARGET (coords.py).
+            "rotation": coords.rot_bl_to_ue(rot.x, rot.y, rot.z),
             "scale": [sc.x, sc.y, sc.z],
         })
     return result

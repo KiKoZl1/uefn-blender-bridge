@@ -1024,7 +1024,7 @@ def _update_transforms_cmd(objects=None, **kw):
         actor.set_actor_location(
             unreal.Vector(loc[0], loc[1], loc[2]), False, False)
         actor.set_actor_rotation(
-            unreal.Rotator(rot[0], rot[1], rot[2]), False)
+            unreal.Rotator(pitch=rot[0], yaw=rot[1], roll=rot[2]), False)
         actor.set_actor_scale3d(unreal.Vector(scale[0], scale[1], scale[2]))
 
         # Update folder from collection path
