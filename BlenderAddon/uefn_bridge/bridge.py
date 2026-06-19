@@ -1127,7 +1127,11 @@ def _obj_data(objects):
             "guid": guid,
             "collection": _get_collection_path(o),
             "location": coords.loc_bl_to_ue(loc.x, loc.y, loc.z),
-            "rotation": coords.rot_bl_to_ue(rot.x, rot.y, rot.z),
+            # The mesh is exported with the object rotation zeroed (local geometry, which
+            # imports UPRIGHT). The object's world rotation must NOT be re-applied on the
+            # actor or it double-counts and tips the mesh over. Verified vs UEFN LUF +
+            # observed data: actor rotation must be identity. (coords.rot_* still used inbound.)
+            "rotation": [0.0, 0.0, 0.0],
             "scale": [sc.x, sc.y, sc.z],
         })
     return result
