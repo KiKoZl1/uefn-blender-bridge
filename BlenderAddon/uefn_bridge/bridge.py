@@ -904,28 +904,24 @@ def _export_fbx(selected_only=False):
     if not any(obj.select_get() for obj in bpy.context.scene.objects):
         return None
 
-    # Export PURE LOCAL geometry: temporarily reset each object's transform to identity
-    # so the FBX node carries NO location/rotation/scale. Otherwise UEFN bakes the node
-    # transform into the mesh AND the actor transform we apply on the UEFN side would
-    # DOUBLE it (the "tiny + rotated + far apart" bug). World placement is done by the
-    # UEFN side via set_actor_* using the transforms captured in `objects` earlier.
+    # Zero only LOCATION and SCALE before export (the UEFN actor supplies world location
+    # and the size is baked via global_scale). KEEP the object's ROTATION so intentional
+    # rotations are carried in the exported geometry — the actor uses identity rotation, so
+    # this is applied exactly once (no double-count).
     selected_meshes = [o for o in bpy.context.scene.objects
                        if o.select_get() and o.type == "MESH"]
     saved = {}
     for o in selected_meshes:
-        saved[o.name] = (o.location.copy(), o.rotation_euler.copy(),
-                         o.rotation_quaternion.copy(), o.scale.copy(), o.rotation_mode)
+        saved[o.name] = (o.location.copy(), o.scale.copy())
         o.location = (0.0, 0.0, 0.0)
-        o.rotation_euler = (0.0, 0.0, 0.0)
-        o.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
         o.scale = (1.0, 1.0, 1.0)
 
     def _restore():
         for o in selected_meshes:
             if o.name in saved:
-                loc, eul, quat, scl, mode = saved[o.name]
-                o.location, o.rotation_euler, o.rotation_quaternion, o.scale = loc, eul, quat, scl
-                o.rotation_mode = mode
+                loc, scl = saved[o.name]
+                o.location = loc
+                o.scale = scl
 
     try:
         for area in bpy.context.screen.areas:
@@ -981,13 +977,10 @@ def _export_fbx_objects(obj_names):
         obj.select_set(True)
         bpy.context.view_layer.objects.active = obj
 
-        # Export PURE LOCAL geometry — reset the object transform to identity so the
-        # FBX node carries no transform (the UEFN actor applies the world transform).
-        saved = (obj.location.copy(), obj.rotation_euler.copy(),
-                 obj.rotation_quaternion.copy(), obj.scale.copy(), obj.rotation_mode)
+        # Zero only LOCATION and SCALE; KEEP rotation so intentional rotations are carried
+        # in the geometry (actor uses identity rotation — applied exactly once).
+        saved = (obj.location.copy(), obj.scale.copy())
         obj.location = (0.0, 0.0, 0.0)
-        obj.rotation_euler = (0.0, 0.0, 0.0)
-        obj.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
         obj.scale = (1.0, 1.0, 1.0)
 
         try:
@@ -1011,7 +1004,7 @@ def _export_fbx_objects(obj_names):
         except Exception as e:
             _err(f"FBX export failed for {name}: {e}")
         finally:
-            obj.location, obj.rotation_euler, obj.rotation_quaternion, obj.scale, obj.rotation_mode = saved
+            obj.location, obj.scale = saved
 
     return results
 
