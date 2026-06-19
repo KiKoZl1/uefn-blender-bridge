@@ -41,6 +41,11 @@ HTTP_TIMEOUT = 120.0
 POLL_INTERVAL = 0.02
 STALE_SEC = 120.0
 ACTOR_PREFIX = "BB_"
+LIVE_POLL_INTERVAL = 0.4   # seconds between UEFN->Blender transform polls when Live Sync is on
+# Commands that write BB_ actor transforms from Blender data — after one runs, the push
+# baseline is refreshed so the live poll doesn't echo Blender's own writes straight back.
+INBOUND_WRITE_CMDS = frozenset(
+    ("import_scene", "import_baked", "add_objects", "update_objects", "update_transforms"))
 
 # ============================================================
 # GLOBALS
@@ -58,6 +63,7 @@ _project_path = ""
 _bridge_project = ""       # project name from Blender (folder under BlenderBridge/)
 _blender_server_port = 0   # Blender's HTTP server port for bidirectional sync
 _last_push_snapshot = {}   # {obj_name: "loc|rot|scale" hash} for diff-based push
+_live_sync_active = False  # True while Blender Live Sync is on -> UEFN polls + pushes changes
 _import_scale = 1.0
 _auto_collision = True
 
@@ -1366,6 +1372,36 @@ def _push_to_blender(port=0, transforms=None):
         return False
 
 
+def _refresh_push_snapshot():
+    """Reset the push baseline to the current actor transforms. Called after applying
+    inbound changes from Blender so the live poll does NOT bounce them straight back."""
+    global _last_push_snapshot
+    if not _live_sync_active:
+        return
+    try:
+        _last_push_snapshot = _snapshot_transforms(_read_bb_transforms())
+    except Exception:
+        pass
+
+
+@_reg("set_live_sync")
+def _set_live_sync_cmd(active=False, **kw):
+    """Blender toggles Live Sync — when on, UEFN polls actor transforms each tick and pushes
+    any user-made changes back to Blender (no UEFN save needed). Baseline is reset on enable
+    so the first poll only reports genuine changes."""
+    global _live_sync_active, _last_push_snapshot
+    _live_sync_active = bool(active)
+    if _live_sync_active:
+        try:
+            _last_push_snapshot = _snapshot_transforms(_read_bb_transforms())
+        except Exception:
+            _last_push_snapshot = {}
+        _log("Live Sync ON — pushing UEFN edits to Blender")
+    else:
+        _log("Live Sync OFF")
+    return {"live": _live_sync_active}
+
+
 @_reg("request_push_transforms")
 def _request_push_transforms_cmd(blender_port=0, **kw):
     """Blender requests UEFN to push current actor transforms back (full sync)."""
@@ -1585,8 +1621,7 @@ class Dashboard:
         self.tick_h = None
         self.fc = 0
         self._sh = ""
-        self._last_dirty = False     # track level dirty state for save detection
-        self._push_cooldown = 0.0    # prevent rapid repeated pushes
+        self._poll_next = 0.0        # next time the live UEFN->Blender transform poll may run
 
         self._build()
         self._on_path()
@@ -1919,6 +1954,7 @@ class Dashboard:
                     return
 
                 n = 0
+                wrote_transforms = False
                 while not _command_queue.empty() and n < TICK_BATCH:
                     try:
                         rid, cmd, par = _command_queue.get_nowait()
@@ -1930,9 +1966,16 @@ class Dashboard:
                     except Exception as e:
                         _log(f"'{cmd}' failed: {e}\n{traceback.format_exc()}", "error")
                         resp = {"success": False, "error": str(e)}
+                    if cmd in INBOUND_WRITE_CMDS:
+                        wrote_transforms = True
                     with _responses_lock:
                         _responses[rid] = resp
                     n += 1
+
+                # A Blender-originated write moved/placed actors — absorb it into the push
+                # baseline so the live poll below doesn't echo it straight back to Blender.
+                if wrote_transforms and _live_sync_active:
+                    _refresh_push_snapshot()
 
                 # Clean stale responses
                 now = time.time()
@@ -1941,23 +1984,19 @@ class Dashboard:
                               if float(k.split("_")[-1]) / 1e9 < now - STALE_SEC]:
                         del _responses[k]
 
-                # Save detection: dirty True→False = user saved
-                if _blender_server_port and _imported_scenes:
+                # Live Sync (UEFN -> Blender): poll actor transforms on a debounce and push any
+                # USER-made changes. Replaces the old save-dirty detection, which never fired
+                # under World Partition (actor edits dirty the actor's external package, not the
+                # world's outermost). No UEFN save needed — moving an actor flows back live.
+                if (_live_sync_active and _blender_server_port
+                        and now > self._poll_next):
+                    self._poll_next = now + LIVE_POLL_INTERVAL
                     try:
-                        world = unreal.EditorLevelLibrary.get_editor_world()
-                        pkg = world.get_outermost() if world else None
-                        is_dirty = pkg.is_dirty() if pkg else False
-                        if self._last_dirty and not is_dirty and now > self._push_cooldown:
-                            self._push_cooldown = now + 2.0
-                            all_transforms = _read_bb_transforms()
-                            if all_transforms:
-                                changed = _diff_transforms(all_transforms)
-                                if changed:
-                                    _log(f"Level saved — {len(changed)}/{len(all_transforms)} changed")
-                                    _push_to_blender(_blender_server_port, changed)
-                                else:
-                                    _log("Level saved — no transform changes")
-                        self._last_dirty = is_dirty
+                        all_transforms = _read_bb_transforms()
+                        if all_transforms:
+                            changed = _diff_transforms(all_transforms)
+                            if changed:
+                                _push_to_blender(_blender_server_port, changed)
                     except Exception:
                         pass
 

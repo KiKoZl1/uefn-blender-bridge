@@ -1569,8 +1569,13 @@ def do_start_live():
     _st.last_object_names = set(_st.last_obj_hashes.keys())
     if _on_save not in bpy.app.handlers.save_post:
         bpy.app.handlers.save_post.append(_on_save)
-    _st.status = "Live: syncs on Ctrl+S"
-    _log("Live sync started (triggers on save)")
+    # Tell UEFN to start pushing actor edits back to us (bidirectional live sync).
+    try:
+        _send("set_live_sync", {"active": True})
+    except Exception as e:
+        _err(f"Could not enable UEFN->Blender live sync: {e}")
+    _st.status = "Live: Blender⇄UEFN"
+    _log("Live sync started (Blender→UEFN on save; UEFN→Blender live)")
 
 
 def do_stop_live():
@@ -1578,6 +1583,10 @@ def do_stop_live():
     _st.live_active = False
     if _on_save in bpy.app.handlers.save_post:
         bpy.app.handlers.save_post.remove(_on_save)
+    try:
+        _send("set_live_sync", {"active": False})
+    except Exception:
+        pass
     _st.status = "Connected"
     _log("Live sync stopped")
 
