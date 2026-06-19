@@ -323,10 +323,13 @@ def _obj_texture_hash(obj):
 
 
 def _obj_transform_hash(obj):
-    """Hash a single object's transform (location, rotation, scale) + collection. All three
-    are actor-applied (data-driven), so any transform change is a FAST update — no re-export."""
+    """Hash a single object's WORLD transform (location, rotation, scale) + collection.
+    Reads matrix_world (the SAME source as _obj_data) so the diff detects exactly what gets
+    sent — including parent-driven changes. All three are actor-applied (data-driven), so any
+    transform change is a FAST update — no re-export."""
     h = hashlib.md5()
-    loc, rot, sc = obj.location, obj.rotation_euler, obj.scale
+    loc, rot_q, sc = obj.matrix_world.decompose()
+    rot = rot_q.to_euler("XYZ")
     h.update(struct.pack("9f", loc.x, loc.y, loc.z, rot.x, rot.y, rot.z, sc.x, sc.y, sc.z))
     h.update(_get_collection_path(obj).encode())
     return h.hexdigest()
@@ -334,6 +337,10 @@ def _obj_transform_hash(obj):
 
 def _snapshot_all():
     """Snapshot all mesh objects' hashes for diff comparison."""
+    # Flush the depsgraph so matrix_world reflects edits made in the N-panel/viewport.
+    # Without this, matrix_world stays STALE until Blender flushes on its own (a save forces
+    # it) — which is why a rotate wasn't picked up by Send Changes until the user saved first.
+    bpy.context.view_layer.update()
     snap = {}
     for obj in bpy.context.scene.objects:
         if obj.type != "MESH":
@@ -902,20 +909,21 @@ def _export_fbx(selected_only=False):
     if not any(obj.select_get() for obj in bpy.context.scene.objects):
         return None
 
-    # Zero only LOCATION and SCALE before export (the UEFN actor supplies world location
-    # and the size is baked via global_scale). KEEP the object's ROTATION so intentional
-    # rotations are carried in the exported geometry — the actor uses identity rotation, so
-    # this is applied exactly once (no double-count).
+    # DATA-DRIVEN export: neutralize the WORLD matrix (parent + local) so the FBX carries the
+    # PURE mesh data — no location, no rotation, no scale, no parent influence. The UEFN actor
+    # supplies the full world transform (location + rotation + world-scale). UEFN reads FBX
+    # numbers as METERS, so global_scale=1 makes m->cm automatic; the actor's world-scale then
+    # gives the correct size in ANY case (parented, unparented, scaled). Zeroing only the LOCAL
+    # transform was wrong: a parent's scale leaked into the geometry (100x gigantic once the
+    # parent was cleared and that scale folded into local).
     selected_meshes = [o for o in bpy.context.scene.objects
                        if o.select_get() and o.type == "MESH"]
     saved = {}
     for o in selected_meshes:
         saved[o.name] = (o.location.copy(), o.rotation_euler.copy(),
                          o.rotation_quaternion.copy(), o.scale.copy(), o.rotation_mode)
-        o.location = (0.0, 0.0, 0.0)
-        o.rotation_euler = (0.0, 0.0, 0.0)
-        o.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
-        o.scale = (1.0, 1.0, 1.0)
+        o.matrix_world = mathutils.Matrix.Identity(4)
+    bpy.context.view_layer.update()
 
     def _restore():
         for o in selected_meshes:
@@ -931,7 +939,7 @@ def _export_fbx(selected_only=False):
                     bpy.ops.export_scene.fbx(
                         filepath=filepath,
                         use_selection=True,
-                        global_scale=100.0,           # bake m->cm INTO the FBX (import-agnostic)
+                        global_scale=1.0,             # UEFN reads FBX as meters -> m->cm automatic
                         apply_unit_scale=False,
                         apply_scale_options="FBX_SCALE_NONE",
                         axis_forward="X", axis_up="Z",  # bake Z-up INTO the FBX (stands upright)
@@ -978,21 +986,21 @@ def _export_fbx_objects(obj_names):
         obj.select_set(True)
         bpy.context.view_layer.objects.active = obj
 
-        # DATA-DRIVEN: export clean local geometry (zero the object transform); the actor
-        # carries the world rotation/scale/location.
+        # DATA-DRIVEN: neutralize the WORLD matrix (parent + local) so the FBX carries the PURE
+        # mesh data; the actor carries the full world location/rotation/world-scale. UEFN reads
+        # FBX as METERS, so global_scale=1 makes m->cm automatic and the actor's world-scale
+        # sizes it correctly in any case (parented, unparented, scaled). See _export_fbx.
         saved = (obj.location.copy(), obj.rotation_euler.copy(),
                  obj.rotation_quaternion.copy(), obj.scale.copy(), obj.rotation_mode)
-        obj.location = (0.0, 0.0, 0.0)
-        obj.rotation_euler = (0.0, 0.0, 0.0)
-        obj.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
-        obj.scale = (1.0, 1.0, 1.0)
+        obj.matrix_world = mathutils.Matrix.Identity(4)
+        bpy.context.view_layer.update()
 
         try:
             with bpy.context.temp_override(area=area_3d):
                 bpy.ops.export_scene.fbx(
                     filepath=filepath,
                     use_selection=True,
-                    global_scale=100.0,           # bake m->cm INTO the FBX (import-agnostic)
+                    global_scale=1.0,             # UEFN reads FBX as meters -> m->cm automatic
                     apply_unit_scale=False,
                     apply_scale_options="FBX_SCALE_NONE",
                     axis_forward="X", axis_up="Z",  # bake Z-up INTO the FBX (stands upright)
@@ -1009,6 +1017,7 @@ def _export_fbx_objects(obj_names):
             _err(f"FBX export failed for {name}: {e}")
         finally:
             obj.location, obj.rotation_euler, obj.rotation_quaternion, obj.scale, obj.rotation_mode = saved
+            bpy.context.view_layer.update()
 
     return results
 
@@ -1106,6 +1115,9 @@ def _obj_data(objects):
     World coordinates only need the handedness flip (negate Y).
     The convention lives in coords.py (single source, unit-tested).
     """
+    # Flush the depsgraph so matrix_world is current (see _snapshot_all) — guarantees we send
+    # the just-edited transform, not a stale one, on the send_selected/send_scene paths too.
+    bpy.context.view_layer.update()
     result = []
     for o in objects:
         mw = o.matrix_world.copy()
