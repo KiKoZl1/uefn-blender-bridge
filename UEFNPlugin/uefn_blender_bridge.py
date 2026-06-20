@@ -1700,7 +1700,6 @@ class Dashboard:
         self._dirty_n = 0            # prior dirty map-package count (save = count drops)
 
         self._build()
-        self._on_path()
         self._on_set()
         self._start_tick()
 
@@ -1725,18 +1724,14 @@ class Dashboard:
 
         tk.Frame(self.root, bg=self.BRD, height=1).pack(fill="x", padx=16, pady=6)
 
-        # Project info
+        # UEFN project (auto-detected — read-only, no field to configure)
         pp = tk.Frame(self.root, bg=bg)
         pp.pack(fill="x", padx=16)
-        tk.Label(pp, text="UEFN PATH", font=("Segoe UI", 7, "bold"),
+        tk.Label(pp, text="UEFN PROJECT", font=("Segoe UI", 7, "bold"),
                  fg=self.DIM, bg=bg).pack(side="left")
-        self.pv = tk.StringVar(value=_project_path or "/Game")
-        pe = tk.Entry(pp, textvariable=self.pv, bg="#0d1117", fg=self.FG,
-                      insertbackground=self.FG, font=("Consolas", 10),
-                      relief="flat", highlightbackground=self.BRD,
-                      highlightthickness=1)
-        pe.pack(side="left", fill="x", expand=True, padx=(8, 0), ipady=4)
-        pe.bind("<KeyRelease>", self._on_path)
+        self.pv = tk.StringVar(value=_project_path or "(detecting...)")
+        tk.Label(pp, textvariable=self.pv, font=("Consolas", 10),
+                 fg=self.PRP, bg=bg).pack(side="left", padx=(8, 0))
 
         # Bridge project name display
         bp = tk.Frame(self.root, bg=bg)
@@ -1871,12 +1866,6 @@ class Dashboard:
 
     # --- Callbacks ---
 
-    def _on_path(self, e=None):
-        global _project_path
-        _project_path = self.pv.get().strip()
-        if _project_path and not _project_path.startswith("/"):
-            _project_path = "/" + _project_path
-
     def _on_set(self):
         global _import_scale
         try:
@@ -1966,6 +1955,8 @@ class Dashboard:
             self.clbl.configure(text="Waiting...", fg=self.DIM)
             self.bv.set("Waiting...")
             self.bp_v.set("Waiting...")
+        # Keep the auto-detected UEFN project shown (read-only).
+        self.pv.set(_project_path or "(detecting...)")
 
         # Import stats
         if _last_import > 0:
