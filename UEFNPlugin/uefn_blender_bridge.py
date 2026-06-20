@@ -156,12 +156,22 @@ def _tex_dir(scene_name=""):
     return f"{root}/{scene_name}" if scene_name else root
 
 
+def _sanitize_seg(s):
+    """UE asset-path segment: only [A-Za-z0-9_-]; everything else (spaces, dots, etc.) -> '_'.
+    A space or dot in a folder name makes rename_asset fail silently."""
+    return "".join(ch if (ch.isalnum() or ch in "_-") else "_" for ch in s)
+
+
 def _collection_folder(root, collection):
     """Asset folder for a Blender collection under a type root (F-16). Mirrors the Blender
-    collection hierarchy directly (no scene wrapper); empty collection -> the type root.
-    Collection may be nested (e.g. 'Buildings/Residential')."""
+    collection hierarchy (no scene wrapper); empty collection -> the type root. Each segment is
+    sanitized for the Content Browser (the Outliner folder keeps the original name with spaces)."""
     c = (collection or "").strip("/")
-    return f"{root}/{c}" if c else root
+    if not c:
+        return root
+    segs = [_sanitize_seg(s) for s in c.split("/") if s]
+    segs = [s for s in segs if s]
+    return root + "/" + "/".join(segs) if segs else root
 
 
 def _asset_lib():
@@ -388,12 +398,27 @@ def _ensure_sm_name(asset, base, dest_folder=None):
         new_pkg = f"{folder}/SM_{base}"
         if new_pkg == pkg:
             return asset
+        # Already named at destination (prior send) — reuse it, drop the staging duplicate.
         if _asset_lib().does_asset_exist(new_pkg):
+            if pkg != new_pkg:
+                try:
+                    _asset_lib().delete_asset(pkg)
+                except Exception:
+                    pass
             return _asset_lib().load_asset(new_pkg) or asset
-        if _asset_lib().rename_asset(pkg, new_pkg):
-            return _asset_lib().load_asset(new_pkg) or asset
+        ok = False
+        try:
+            ok = _asset_lib().rename_asset(pkg, new_pkg)
+        except Exception as e:
+            _log(f"  SM_ rename error {cur} -> {new_pkg}: {e}", "warning")
+        if ok:
+            moved = _asset_lib().load_asset(new_pkg)
+            if moved:
+                _log(f"  named SM_{base} @ {folder}")
+                return moved
+        _log(f"  SM_ rename FAILED: {cur} -> {new_pkg}", "warning")
     except Exception as e:
-        _log(f"  SM_ route skipped for {base}: {e}", "warning")
+        _log(f"  SM_ route error for {base}: {e}", "warning")
     return asset
 
 
