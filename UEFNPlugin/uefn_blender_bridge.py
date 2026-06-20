@@ -858,7 +858,9 @@ def _get_status():
 def _blender_connect(blender_version="", addon_version="", project_name="",
                      server_port=0, **kw):
     global _blender_info, _bridge_project, _blender_server_port
-    _bridge_project = project_name.strip() or "Default"
+    # Folder name = the Blender .blend name (sent by Blender). Sanitize for a valid asset path
+    # (a space/dot would break it). This is the BLENDER project, not the UEFN project.
+    _bridge_project = _sanitize_seg(project_name.strip()) or "Default"
     _blender_server_port = int(server_port) if server_port else 0
     _blender_info = {
         "version": blender_version,

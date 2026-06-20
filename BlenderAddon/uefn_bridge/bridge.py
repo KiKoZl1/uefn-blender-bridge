@@ -1198,14 +1198,21 @@ def _obj_data(objects):
 # ============================================================
 
 
+def _blend_project_name():
+    """Project folder name = the .blend filename (no extension). Auto-identifies the Blender
+    project — no typing — and keeps each .blend's assets in its own UEFN subfolder. '' if unsaved."""
+    path = bpy.data.filepath
+    return os.path.splitext(os.path.basename(path))[0] if path else ""
+
+
 def do_connect():
     """Connect to UEFN bridge."""
     props = bpy.context.scene.uefn_bridge
-    pname = props.project_name.strip()
-    if not pname:
-        _st.status = "Enter a project name first"
-        _err("Project name is required before connecting")
-        return False
+    # Auto: the .blend filename. Optional manual override via the panel field. Never blocks.
+    pname = props.project_name.strip() or _blend_project_name() or "Untitled"
+    if pname == "Untitled":
+        _log("Unsaved .blend — using 'Untitled'. Save the file to name the project folder.",
+             "warning")
 
     _st.status = "Connecting..."
     _log(f"Connecting to UEFN at {_url()}...")
@@ -1844,7 +1851,8 @@ class UEFNBridgeProperties(bpy.types.PropertyGroup):
     project_name: bpy.props.StringProperty(
         name="Project",
         default="",
-        description="Bridge project name — creates a folder in UEFN (e.g. MyMap, Level01)",
+        description="Optional override for the UEFN subfolder name. Leave EMPTY to use the "
+                    ".blend filename automatically (recommended)",
     )
     host: bpy.props.StringProperty(
         name="Host",
@@ -1941,6 +1949,9 @@ class UEFNBRIDGE_PT_connection(bpy.types.Panel):
 
         if not _st.connected:
             layout.prop(props, "project_name", icon="FILE_FOLDER")
+            if not props.project_name.strip():
+                auto = _blend_project_name() or "Untitled — save the .blend"
+                layout.label(text=f"Auto: {auto}", icon="FILE_BLEND")
             layout.separator()
             layout.prop(props, "host")
             layout.prop(props, "port")
