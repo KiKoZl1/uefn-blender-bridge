@@ -1310,6 +1310,23 @@ def _read_bb_transforms():
     return result
 
 
+def _any_bb_dirty():
+    """True if any BB_ actor has unsaved edits. Under World Partition each actor lives in its
+    own external package, so we check the actor's outermost package — the world's outermost
+    package never flips dirty for a plain actor move, which is why the old save detection failed."""
+    asub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    for actor in asub.get_all_level_actors():
+        label = actor.get_actor_label()
+        if label and label.startswith(ACTOR_PREFIX):
+            try:
+                pkg = actor.get_outermost()
+                if pkg and pkg.is_dirty():
+                    return True
+            except Exception:
+                pass
+    return False
+
+
 def _transform_hash(t):
     """Hash a single transform dict for diff comparison."""
     loc = t.get("location", [0, 0, 0])
@@ -1623,7 +1640,8 @@ class Dashboard:
         self.tick_h = None
         self.fc = 0
         self._sh = ""
-        self._poll_next = 0.0        # next time the live UEFN->Blender transform poll may run
+        self._poll_next = 0.0        # debounce for the UEFN->Blender save check
+        self._was_dirty = False      # prior dirty state of BB_ actors (save = dirty->clean)
 
         self._build()
         self._on_path()
@@ -1986,19 +2004,22 @@ class Dashboard:
                               if float(k.split("_")[-1]) / 1e9 < now - STALE_SEC]:
                         del _responses[k]
 
-                # Live Sync (UEFN -> Blender): poll actor transforms on a debounce and push any
-                # USER-made changes. Replaces the old save-dirty detection, which never fired
-                # under World Partition (actor edits dirty the actor's external package, not the
-                # world's outermost). No UEFN save needed — moving an actor flows back live.
+                # Live Sync (UEFN -> Blender): push on SAVE (Ctrl+S), mirroring Blender->UEFN —
+                # not on every drag (that lagged). A save is the dirty->clean transition of the
+                # BB_ actors' own packages (World-Partition safe). Debounced via _poll_next.
                 if (_live_sync_active and _blender_server_port
                         and now > self._poll_next):
                     self._poll_next = now + LIVE_POLL_INTERVAL
                     try:
-                        all_transforms = _read_bb_transforms()
-                        if all_transforms:
-                            changed = _diff_transforms(all_transforms)
-                            if changed:
-                                _push_to_blender(_blender_server_port, changed)
+                        any_dirty = _any_bb_dirty()
+                        if self._was_dirty and not any_dirty:
+                            all_transforms = _read_bb_transforms()
+                            if all_transforms:
+                                changed = _diff_transforms(all_transforms)
+                                if changed:
+                                    _log(f"Level saved — pushing {len(changed)} change(s) to Blender")
+                                    _push_to_blender(_blender_server_port, changed)
+                        self._was_dirty = any_dirty
                     except Exception:
                         pass
 
