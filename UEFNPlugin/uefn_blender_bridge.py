@@ -1310,21 +1310,66 @@ def _read_bb_transforms():
     return result
 
 
+def _actor_pkg(actor):
+    """The package that carries an actor's unsaved-edits flag. Under OFPA/World Partition the
+    actor is saved in its own EXTERNAL package; get_package() returns that, while get_outermost()
+    returns the MAP package (never dirtied by a move). Prefer get_package(), fall back gracefully."""
+    for getter in ("get_package", "get_outermost"):
+        try:
+            pkg = getattr(actor, getter)()
+            if pkg is not None:
+                return pkg
+        except Exception:
+            continue
+    return None
+
+
 def _any_bb_dirty():
-    """True if any BB_ actor has unsaved edits. Under World Partition each actor lives in its
-    own external package, so we check the actor's outermost package — the world's outermost
-    package never flips dirty for a plain actor move, which is why the old save detection failed."""
+    """True if any BB_ actor has unsaved edits (its external package is dirty)."""
     asub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     for actor in asub.get_all_level_actors():
         label = actor.get_actor_label()
         if label and label.startswith(ACTOR_PREFIX):
             try:
-                pkg = actor.get_outermost()
+                pkg = _actor_pkg(actor)
                 if pkg and pkg.is_dirty():
                     return True
             except Exception:
                 pass
     return False
+
+
+def _probe_dirty_api():
+    """One-shot diagnostic (logged when Live Sync turns on): shows which package-dirty API the
+    running UEFN build exposes, so the save detector can be confirmed without guesswork."""
+    try:
+        asub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+        sample = None
+        for actor in asub.get_all_level_actors():
+            label = actor.get_actor_label()
+            if label and label.startswith(ACTOR_PREFIX):
+                sample = actor
+                break
+        if sample:
+            parts = []
+            for getter in ("get_package", "get_outermost"):
+                try:
+                    pkg = getattr(sample, getter)()
+                    nm = pkg.get_name() if pkg else None
+                    dr = pkg.is_dirty() if pkg else "?"
+                    parts.append(f"{getter}->{nm}(dirty={dr})")
+                except Exception as e:
+                    parts.append(f"{getter}->ERR:{type(e).__name__}")
+            _log("dirty-probe " + sample.get_actor_label() + ": " + " | ".join(parts))
+        else:
+            _log("dirty-probe: no BB_ actor present yet")
+        try:
+            dm = unreal.EditorLoadingAndSavingUtils.get_dirty_map_packages()
+            _log(f"dirty-probe: get_dirty_map_packages OK ({len(dm)} dirty)")
+        except Exception as e:
+            _log(f"dirty-probe: get_dirty_map_packages ERR:{type(e).__name__}")
+    except Exception as e:
+        _log(f"dirty-probe failed: {e}")
 
 
 def _transform_hash(t):
@@ -1418,6 +1463,7 @@ def _set_live_sync_cmd(active=False, blender_port=0, **kw):
         except Exception:
             _last_push_snapshot = {}
         _log(f"Live Sync ON — will push UEFN saves to Blender (port {_blender_server_port})")
+        _probe_dirty_api()
     else:
         _log("Live Sync OFF")
     return {"live": _live_sync_active, "blender_port": _blender_server_port}
