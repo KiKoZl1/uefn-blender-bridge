@@ -1310,66 +1310,15 @@ def _read_bb_transforms():
     return result
 
 
-def _actor_pkg(actor):
-    """The package that carries an actor's unsaved-edits flag. Under OFPA/World Partition the
-    actor is saved in its own EXTERNAL package; get_package() returns that, while get_outermost()
-    returns the MAP package (never dirtied by a move). Prefer get_package(), fall back gracefully."""
-    for getter in ("get_package", "get_outermost"):
-        try:
-            pkg = getattr(actor, getter)()
-            if pkg is not None:
-                return pkg
-        except Exception:
-            continue
-    return None
-
-
-def _any_bb_dirty():
-    """True if any BB_ actor has unsaved edits (its external package is dirty)."""
-    asub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
-    for actor in asub.get_all_level_actors():
-        label = actor.get_actor_label()
-        if label and label.startswith(ACTOR_PREFIX):
-            try:
-                pkg = _actor_pkg(actor)
-                if pkg and pkg.is_dirty():
-                    return True
-            except Exception:
-                pass
-    return False
-
-
-def _probe_dirty_api():
-    """One-shot diagnostic (logged when Live Sync turns on): shows which package-dirty API the
-    running UEFN build exposes, so the save detector can be confirmed without guesswork."""
+def _dirty_map_count():
+    """Number of dirty map packages. Under OFPA/World Partition a moved actor dirties its own
+    external (__ExternalActors__) package, which counts as a map package; saving clears it — so
+    a DROP in this count means a save happened. This is the only dirty API this UEFN build
+    exposes to Python (actor.get_package/get_outermost raise AttributeError here)."""
     try:
-        asub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
-        sample = None
-        for actor in asub.get_all_level_actors():
-            label = actor.get_actor_label()
-            if label and label.startswith(ACTOR_PREFIX):
-                sample = actor
-                break
-        if sample:
-            parts = []
-            for getter in ("get_package", "get_outermost"):
-                try:
-                    pkg = getattr(sample, getter)()
-                    nm = pkg.get_name() if pkg else None
-                    dr = pkg.is_dirty() if pkg else "?"
-                    parts.append(f"{getter}->{nm}(dirty={dr})")
-                except Exception as e:
-                    parts.append(f"{getter}->ERR:{type(e).__name__}")
-            _log("dirty-probe " + sample.get_actor_label() + ": " + " | ".join(parts))
-        else:
-            _log("dirty-probe: no BB_ actor present yet")
-        try:
-            dm = unreal.EditorLoadingAndSavingUtils.get_dirty_map_packages()
-            _log(f"dirty-probe: get_dirty_map_packages OK ({len(dm)} dirty)")
-        except Exception as e:
-            _log(f"dirty-probe: get_dirty_map_packages ERR:{type(e).__name__}")
-    except Exception as e:
-        _log(f"dirty-probe failed: {e}")
+        return len(unreal.EditorLoadingAndSavingUtils.get_dirty_map_packages())
+    except Exception:
+        return -1
 
 
 def _transform_hash(t):
@@ -1462,8 +1411,7 @@ def _set_live_sync_cmd(active=False, blender_port=0, **kw):
             _last_push_snapshot = _snapshot_transforms(_read_bb_transforms())
         except Exception:
             _last_push_snapshot = {}
-        _log(f"Live Sync ON — will push UEFN saves to Blender (port {_blender_server_port})")
-        _probe_dirty_api()
+        _log(f"Live Sync ON — push on Ctrl+S (port {_blender_server_port}, {_dirty_map_count()} dirty)")
     else:
         _log("Live Sync OFF")
     return {"live": _live_sync_active, "blender_port": _blender_server_port}
@@ -1689,7 +1637,7 @@ class Dashboard:
         self.fc = 0
         self._sh = ""
         self._poll_next = 0.0        # debounce for the UEFN->Blender save check
-        self._was_dirty = False      # prior dirty state of BB_ actors (save = dirty->clean)
+        self._dirty_n = 0            # prior dirty map-package count (save = count drops)
 
         self._build()
         self._on_path()
@@ -2059,12 +2007,12 @@ class Dashboard:
                         and now > self._poll_next):
                     self._poll_next = now + LIVE_POLL_INTERVAL
                     try:
-                        any_dirty = _any_bb_dirty()
-                        if any_dirty != self._was_dirty:
-                            if any_dirty:
-                                _log("UEFN edits detected (unsaved) — will push on Ctrl+S")
+                        n_dirty = _dirty_map_count()
+                        if n_dirty >= 0 and n_dirty != self._dirty_n:
+                            if n_dirty > self._dirty_n:
+                                _log(f"UEFN edits detected ({n_dirty} unsaved) — push on Ctrl+S")
                             else:
-                                # dirty -> clean = a save happened
+                                # count dropped = packages were saved
                                 all_transforms = _read_bb_transforms()
                                 changed = _diff_transforms(all_transforms) if all_transforms else []
                                 if changed:
@@ -2072,7 +2020,7 @@ class Dashboard:
                                     _push_to_blender(_blender_server_port, changed)
                                 else:
                                     _log("Saved — no Blender-relevant changes")
-                            self._was_dirty = any_dirty
+                            self._dirty_n = n_dirty
                     except Exception:
                         pass
 
