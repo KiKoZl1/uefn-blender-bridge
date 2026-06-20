@@ -64,6 +64,7 @@ _bridge_project = ""       # project name from Blender (folder under BlenderBrid
 _blender_server_port = 0   # Blender's HTTP server port for bidirectional sync
 _last_push_snapshot = {}   # {obj_name: "loc|rot|scale" hash} for diff-based push
 _live_sync_active = False  # True while Blender Live Sync is on -> UEFN polls + pushes changes
+_eal_cache = None          # cached EditorAssetSubsystem (modern) or EditorAssetLibrary fallback
 _import_scale = 1.0
 _auto_collision = True
 
@@ -155,6 +156,22 @@ def _tex_dir(scene_name=""):
     return f"{root}/{scene_name}" if scene_name else root
 
 
+def _asset_lib():
+    """Asset ops via EditorAssetSubsystem (modern) when available, else the deprecated-but-
+    working EditorAssetLibrary. Both expose the same method names (does_asset_exist, load_asset,
+    save_asset, delete_asset, list_assets, rename_asset, find_asset_data, does/delete_directory),
+    so call sites are identical. Safe on restrictive builds — falls back instead of breaking."""
+    global _eal_cache
+    if _eal_cache is None:
+        try:
+            _eal_cache = unreal.get_editor_subsystem(unreal.EditorAssetSubsystem)
+        except Exception:
+            _eal_cache = None
+        if _eal_cache is None:
+            _eal_cache = unreal.EditorAssetLibrary
+    return _eal_cache
+
+
 def _detect_project_path():
     global _project_path
     try:
@@ -204,7 +221,7 @@ def _serialize(obj):
 
 def _asset_class(path):
     try:
-        ad = unreal.EditorAssetLibrary.find_asset_data(path)
+        ad = _asset_lib().find_asset_data(path)
         return str(ad.asset_class_path.asset_name) if hasattr(ad, "asset_class_path") else str(getattr(ad, "asset_class", ""))
     except Exception:
         return ""
@@ -223,7 +240,7 @@ def _import_tex(fp, dest, name):
     task.set_editor_property("save", True)
     unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
     exp = f"{dest}/{name}"
-    if unreal.EditorAssetLibrary.does_asset_exist(exp):
+    if _asset_lib().does_asset_exist(exp):
         return exp
     try:
         ps = task.get_editor_property("imported_object_paths")
@@ -235,7 +252,7 @@ def _import_tex(fp, dest, name):
 
 
 def _config_tex(path, ch):
-    tex = unreal.EditorAssetLibrary.load_asset(path)
+    tex = _asset_lib().load_asset(path)
     if not tex:
         return
     try:
@@ -247,7 +264,7 @@ def _config_tex(path, ch):
             tex.set_editor_property("srgb", False)
         elif ch in ("BaseColor", "Emissive"):
             tex.set_editor_property("srgb", True)
-        unreal.EditorAssetLibrary.save_asset(path)
+        _asset_lib().save_asset(path)
     except Exception:
         pass
 
@@ -361,10 +378,10 @@ def _ensure_sm_name(asset, base):
         if cur.startswith("SM_"):
             return asset
         new_pkg = f"{folder}/SM_{base}"
-        if unreal.EditorAssetLibrary.does_asset_exist(new_pkg):
-            return unreal.EditorAssetLibrary.load_asset(new_pkg) or asset
-        if unreal.EditorAssetLibrary.rename_asset(pkg, new_pkg):
-            return unreal.EditorAssetLibrary.load_asset(new_pkg) or asset
+        if _asset_lib().does_asset_exist(new_pkg):
+            return _asset_lib().load_asset(new_pkg) or asset
+        if _asset_lib().rename_asset(pkg, new_pkg):
+            return _asset_lib().load_asset(new_pkg) or asset
     except Exception as e:
         _log(f"  SM_ rename skipped for {base}: {e}", "warning")
     return asset
@@ -490,10 +507,10 @@ def _cleanup_actors(names=None):
 
 def _cleanup_assets(dest):
     try:
-        if unreal.EditorAssetLibrary.does_directory_exist(dest):
-            for a in unreal.EditorAssetLibrary.list_assets(dest, recursive=True):
+        if _asset_lib().does_directory_exist(dest):
+            for a in _asset_lib().list_assets(dest, recursive=True):
                 try:
-                    unreal.EditorAssetLibrary.delete_asset(str(a))
+                    _asset_lib().delete_asset(str(a))
                 except Exception:
                     pass
     except Exception:
@@ -513,7 +530,7 @@ def _create_parent_material(mat_name, dest, textures, mel):
     has = lambda ch: ch in textures
 
     def tex_p(name, x, y, ch):
-        tex = unreal.EditorAssetLibrary.load_asset(textures[ch])
+        tex = _asset_lib().load_asset(textures[ch])
         n = mel.create_material_expression(mat, unreal.MaterialExpressionTextureSampleParameter2D, x, y)
         n.set_editor_property("parameter_name", name)
         n.set_editor_property("texture", tex)
@@ -591,19 +608,19 @@ def _create_parent_material(mat_name, dest, textures, mel):
         mel.recompile_material(mat)
     except Exception:
         pass
-    unreal.EditorAssetLibrary.save_asset(mp)
+    _asset_lib().save_asset(mp)
     _log(f"  Parent material: {mat_name} ({len(textures)} ch)")
     return mp
 
 
 def _create_mi(mi_name, dest, parent_path, textures):
     mi_path = f"{dest}/{mi_name}"
-    if unreal.EditorAssetLibrary.does_asset_exist(mi_path):
-        mi = unreal.EditorAssetLibrary.load_asset(mi_path)
+    if _asset_lib().does_asset_exist(mi_path):
+        mi = _asset_lib().load_asset(mi_path)
         if mi:
             _set_mi_tex(mi, mi_path, textures)
             return mi_path
-        unreal.EditorAssetLibrary.delete_asset(mi_path)
+        _asset_lib().delete_asset(mi_path)
 
     tools = unreal.AssetToolsHelpers.get_asset_tools()
     try:
@@ -616,7 +633,7 @@ def _create_mi(mi_name, dest, parent_path, textures):
     if not mi:
         return parent_path
 
-    parent = unreal.EditorAssetLibrary.load_asset(parent_path)
+    parent = _asset_lib().load_asset(parent_path)
     if parent:
         mi.set_editor_property("parent", parent)
 
@@ -636,18 +653,18 @@ def _set_mi_tex(mi, mi_path, textures):
         p = pmap.get(ch)
         if not p:
             continue
-        tex = unreal.EditorAssetLibrary.load_asset(tp)
+        tex = _asset_lib().load_asset(tp)
         if not tex:
             continue
         try:
             mel.set_material_instance_texture_parameter_value(mi, p, tex)
         except Exception:
             pass
-    unreal.EditorAssetLibrary.save_asset(mi_path)
+    _asset_lib().save_asset(mi_path)
 
 
 def _apply_material_to_actors(actors, mi_path):
-    mat = unreal.EditorAssetLibrary.load_asset(mi_path)
+    mat = _asset_lib().load_asset(mi_path)
     if not mat:
         return
     count = 0
@@ -869,7 +886,7 @@ def _import_scene_cmd(fbx_path="", scene_name="Scene", objects=None,
         if not mesh_paths:
             # Last resort: load every asset in folder
             try:
-                for a in unreal.EditorAssetLibrary.list_assets(mesh_dest, recursive=True):
+                for a in _asset_lib().list_assets(mesh_dest, recursive=True):
                     try:
                         asset = unreal.load_asset(str(a))
                         if asset and isinstance(asset, unreal.StaticMesh):
@@ -976,7 +993,7 @@ def _import_baked_cmd(fbx_path="", scene_name="Scene", objects=None,
         cls = _asset_class(p)
         if "Material" in cls and "Instance" not in cls:
             try:
-                unreal.EditorAssetLibrary.delete_asset(p)
+                _asset_lib().delete_asset(p)
             except Exception:
                 pass
 
@@ -1245,7 +1262,7 @@ def _update_textures_cmd(object_names=None, exchange_folder="",
     if existing_mats:
         # Rebind textures on existing MIs
         for sn, mi_path in existing_mats.items():
-            mi = unreal.EditorAssetLibrary.load_asset(mi_path)
+            mi = _asset_lib().load_asset(mi_path)
             if not mi:
                 continue
             # Build tex_paths for this MI from imported textures
@@ -1466,8 +1483,8 @@ def _clean_all_cmd(**kw):
             dest = dir_fn(scene_name)
             _cleanup_assets(dest)
             try:
-                if unreal.EditorAssetLibrary.does_directory_exist(dest):
-                    unreal.EditorAssetLibrary.delete_directory(dest)
+                if _asset_lib().does_directory_exist(dest):
+                    _asset_lib().delete_directory(dest)
             except Exception:
                 pass
         cleaned_folders.append(scene_name)
@@ -1856,7 +1873,7 @@ class Dashboard:
         if not mats:
             _log("No materials to apply", "warning")
             return
-        fm = unreal.EditorAssetLibrary.load_asset(list(mats.values())[0])
+        fm = _asset_lib().load_asset(list(mats.values())[0])
         if not fm:
             return
         c = 0
