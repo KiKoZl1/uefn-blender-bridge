@@ -158,7 +158,8 @@ def _tex_dir(scene_name=""):
 def _detect_project_path():
     global _project_path
     try:
-        world = unreal.EditorLevelLibrary.get_editor_world()
+        world = unreal.get_editor_subsystem(
+            unreal.UnrealEditorSubsystem).get_editor_world()
         wp = world.get_path_name()
         _project_path = "/" + wp.split("/")[1]
         _log(f"Project path: {_project_path}")
@@ -317,7 +318,8 @@ def _import_fbx(fbx_path, dest_path, combine=False):
 
 def _spawn_at_camera():
     try:
-        loc, rot = unreal.EditorLevelLibrary.get_level_viewport_camera_info()
+        loc, rot = unreal.get_editor_subsystem(
+            unreal.UnrealEditorSubsystem).get_level_viewport_camera_info()
         yr = math.radians(rot.yaw)
         pr = math.radians(rot.pitch)
         return unreal.Vector(
