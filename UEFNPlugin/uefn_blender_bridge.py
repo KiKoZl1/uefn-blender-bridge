@@ -156,6 +156,14 @@ def _tex_dir(scene_name=""):
     return f"{root}/{scene_name}" if scene_name else root
 
 
+def _collection_folder(root, collection):
+    """Asset folder for a Blender collection under a type root (F-16). Mirrors the Blender
+    collection hierarchy directly (no scene wrapper); empty collection -> the type root.
+    Collection may be nested (e.g. 'Buildings/Residential')."""
+    c = (collection or "").strip("/")
+    return f"{root}/{c}" if c else root
+
+
 def _asset_lib():
     """Asset ops via EditorAssetSubsystem (modern) when available, else the deprecated-but-
     working EditorAssetLibrary. Both expose the same method names (does_asset_exist, load_asset,
@@ -369,21 +377,23 @@ def _find_actor_by_guid(asub, guid):
     return None
 
 
-def _ensure_sm_name(asset, base):
-    """Rename an imported StaticMesh to the UE convention SM_<base> (F-43), reusing an
-    existing SM_ asset of that name if present (mesh dedup — F-44). Falls back safely."""
+def _ensure_sm_name(asset, base, dest_folder=None):
+    """Rename/move an imported StaticMesh to <dest_folder>/SM_<base> (F-43 naming + F-16
+    collection subfolder). dest_folder defaults to the asset's current folder. Reuses an
+    existing asset at the destination (mesh dedup — F-44). Falls back safely."""
     try:
         pkg = asset.get_path_name().split(".")[0]
-        folder, cur = pkg.rsplit("/", 1)
-        if cur.startswith("SM_"):
-            return asset
+        cur_folder, cur = pkg.rsplit("/", 1)
+        folder = dest_folder or cur_folder
         new_pkg = f"{folder}/SM_{base}"
+        if new_pkg == pkg:
+            return asset
         if _asset_lib().does_asset_exist(new_pkg):
             return _asset_lib().load_asset(new_pkg) or asset
         if _asset_lib().rename_asset(pkg, new_pkg):
             return _asset_lib().load_asset(new_pkg) or asset
     except Exception as e:
-        _log(f"  SM_ rename skipped for {base}: {e}", "warning")
+        _log(f"  SM_ route skipped for {base}: {e}", "warning")
     return asset
 
 
@@ -424,11 +434,13 @@ def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
 
             bname = od.get("name", "") if od else asset_name
             guid = od.get("guid", "") if od else ""
+            collection = od.get("collection", "") if od else ""
             label = f"{ACTOR_PREFIX}{bname}"
 
-            # UE naming convention on the mesh asset (F-43): SM_<name>, reusing an
-            # existing SM_ asset of the same name when present (mesh dedup — F-44).
-            asset = _ensure_sm_name(asset, bname.replace(".", "_"))
+            # UE naming + collection subfolder (F-43/F-16): move to <Meshes>/<collection>/SM_<name>
+            # (mirrors the Blender collection tree), reusing an existing asset there (dedup F-44).
+            dest_folder = _collection_folder(_mesh_dir(), collection)
+            asset = _ensure_sm_name(asset, bname.replace(".", "_"), dest_folder)
 
             # Match an existing actor by GUID first (survives rename), then by label (B3).
             existing = (_find_actor_by_guid(asub, guid) if guid else None) \
@@ -463,7 +475,6 @@ def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
                 actor.set_actor_scale3d(
                     unreal.Vector(scale[0], scale[1], scale[2]))
 
-                collection = od.get("collection", "")
                 actor.set_folder_path(
                     f"/BlenderBridge/{collection}" if collection else "/BlenderBridge")
             elif not reused:
