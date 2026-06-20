@@ -174,6 +174,14 @@ def _collection_folder(root, collection):
     return root + "/" + "/".join(segs) if segs else root
 
 
+def _outliner_folder(collection=""):
+    """World Outliner folder for bridge actors: /BlenderBridge/<project>/<collection> — mirrors
+    the Content Browser hierarchy. Collection sits loose under the project root when empty."""
+    base = f"/BlenderBridge/{_bridge_project}" if _bridge_project else "/BlenderBridge"
+    c = (collection or "").strip("/")
+    return f"{base}/{c}" if c else base
+
+
 def _asset_lib():
     """Asset ops via EditorAssetSubsystem (modern) when available, else the deprecated-but-
     working EditorAssetLibrary. Both expose the same method names (does_asset_exist, load_asset,
@@ -453,7 +461,7 @@ def _apply_obj_transform(actor, od):
     actor.set_actor_location(unreal.Vector(loc[0], loc[1], loc[2]), False, False)
     actor.set_actor_rotation(unreal.Rotator(pitch=rot[0], yaw=rot[1], roll=rot[2]), False)
     actor.set_actor_scale3d(unreal.Vector(scale[0], scale[1], scale[2]))
-    actor.set_folder_path(f"/BlenderBridge/{collection}" if collection else "/BlenderBridge")
+    actor.set_folder_path(_outliner_folder(collection))
 
 
 def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
@@ -495,7 +503,7 @@ def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
             asset = _ensure_sm_name(asset, name, _mesh_dir())
             actor = _spawn_or_reuse(asub, asset, f"{ACTOR_PREFIX}{name}", "")
             if actor:
-                actor.set_folder_path("/BlenderBridge")
+                actor.set_folder_path(_outliner_folder())
                 actors.append(actor)
         _log(f"Placed {len(actors)} actor(s)")
         return actors
@@ -1108,12 +1116,8 @@ def _update_transforms_cmd(objects=None, **kw):
             unreal.Rotator(pitch=rot[0], yaw=rot[1], roll=rot[2]), False)
         actor.set_actor_scale3d(unreal.Vector(scale[0], scale[1], scale[2]))
 
-        # Update folder from collection path
-        collection = od.get("collection", "")
-        if collection:
-            actor.set_folder_path(f"/BlenderBridge/{collection}")
-        else:
-            actor.set_folder_path("/BlenderBridge")
+        # Update folder: /BlenderBridge/<project>/<collection> (mirrors the Content Browser)
+        actor.set_folder_path(_outliner_folder(od.get("collection", "")))
 
         updated += 1
 
