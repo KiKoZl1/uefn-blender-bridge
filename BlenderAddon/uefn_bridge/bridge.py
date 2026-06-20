@@ -1208,11 +1208,17 @@ def _blend_project_name():
 def do_connect():
     """Connect to UEFN bridge."""
     props = bpy.context.scene.uefn_bridge
-    # Auto: the .blend filename. Optional manual override via the panel field. Never blocks.
-    pname = props.project_name.strip() or _blend_project_name() or "Untitled"
-    if pname == "Untitled":
-        _log("Unsaved .blend — using 'Untitled'. Save the file to name the project folder.",
-             "warning")
+    # Auto: the .blend filename. Optional manual override via the panel field. A STABLE name is
+    # required from the first sync — connecting as "Untitled" then saving later would move the
+    # folder and orphan everything already synced. So block until there's a name.
+    pname = props.project_name.strip() or _blend_project_name()
+    if not pname:
+        _st.status = "Save the .blend or set a Project name"
+        _err("Project needs a name before connecting.\n"
+             "  - Save the .blend (Ctrl+S) — the filename becomes the project folder, OR\n"
+             "  - Type a Project name in the panel.\n"
+             "Keeps your UEFN assets in a stable folder (no orphans when you rename later).")
+        return False
 
     _st.status = "Connecting..."
     _log(f"Connecting to UEFN at {_url()}...")
@@ -1950,8 +1956,11 @@ class UEFNBRIDGE_PT_connection(bpy.types.Panel):
         if not _st.connected:
             layout.prop(props, "project_name", icon="FILE_FOLDER")
             if not props.project_name.strip():
-                auto = _blend_project_name() or "Untitled — save the .blend"
-                layout.label(text=f"Auto: {auto}", icon="FILE_BLEND")
+                auto = _blend_project_name()
+                if auto:
+                    layout.label(text=f"Auto: {auto}", icon="FILE_BLEND")
+                else:
+                    layout.label(text="Save the .blend or type a name", icon="ERROR")
             layout.separator()
             layout.prop(props, "host")
             layout.prop(props, "port")
