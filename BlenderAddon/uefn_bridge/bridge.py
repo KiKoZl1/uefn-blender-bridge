@@ -925,6 +925,10 @@ def _export_fbx(selected_only=False):
         if o.name not in rep_names:
             o.select_set(False)
     selected_meshes = [o for o in selected_meshes if o.name in rep_names]
+    # Keep a SELECTED object active — deselecting non-reps can orphan the active object, which
+    # makes the FBX exporter produce an empty file on some selections.
+    if selected_meshes:
+        bpy.context.view_layer.objects.active = selected_meshes[0]
     saved = {}
     for o in selected_meshes:
         saved[o.name] = (o.location.copy(), o.rotation_euler.copy(),
@@ -1114,6 +1118,22 @@ def _get_collection_path(obj):
     return max(paths, key=lambda p: p.count("/"))
 
 
+def _dedup_guids():
+    """Ensure every mesh object has a UNIQUE bb_guid. Blender COPIES custom properties on
+    duplicate (Shift+D / Alt+D), so duplicates inherit the source's bb_guid and would all
+    collapse onto the SAME UEFN actor (the bridge matches actors by GUID). The first holder
+    (by name) keeps the guid; every later collider gets a fresh one (persisted = stable)."""
+    seen = set()
+    for o in sorted((ob for ob in bpy.context.scene.objects if ob.type == "MESH"),
+                    key=lambda x: x.name):
+        g = o.get("bb_guid")
+        if g and g in seen:
+            g = uuid.uuid4().hex
+            o["bb_guid"] = g
+        if g:
+            seen.add(g)
+
+
 def _mesh_rep_map(objects):
     """Map each mesh datablock name -> its REPRESENTATIVE object name (min name) among `objects`.
     Objects sharing a datablock (linked duplicates) resolve to one representative, so they export
@@ -1144,6 +1164,7 @@ def _obj_data(objects):
     # Flush the depsgraph so matrix_world is current (see _snapshot_all) — guarantees we send
     # the just-edited transform, not a stale one, on the send_selected/send_scene paths too.
     bpy.context.view_layer.update()
+    _dedup_guids()                  # duplicates (Alt+D/Shift+D) inherit bb_guid -> give fresh ones
     reps = _mesh_rep_map(objects)   # instancing (F-44): shared datablock -> one representative
     result = []
     for o in objects:
