@@ -1404,21 +1404,23 @@ def _refresh_push_snapshot():
 
 
 @_reg("set_live_sync")
-def _set_live_sync_cmd(active=False, **kw):
-    """Blender toggles Live Sync — when on, UEFN polls actor transforms each tick and pushes
-    any user-made changes back to Blender (no UEFN save needed). Baseline is reset on enable
-    so the first poll only reports genuine changes."""
-    global _live_sync_active, _last_push_snapshot
+def _set_live_sync_cmd(active=False, blender_port=0, **kw):
+    """Blender toggles Live Sync — when on, UEFN pushes actor edits back to Blender on each
+    UEFN save (Ctrl+S). Carries Blender's server port so a toggle re-establishes it even after
+    the UEFN script was re-run (which resets these globals). Baseline reset on enable."""
+    global _live_sync_active, _last_push_snapshot, _blender_server_port
     _live_sync_active = bool(active)
+    if blender_port:
+        _blender_server_port = int(blender_port)
     if _live_sync_active:
         try:
             _last_push_snapshot = _snapshot_transforms(_read_bb_transforms())
         except Exception:
             _last_push_snapshot = {}
-        _log("Live Sync ON — pushing UEFN edits to Blender")
+        _log(f"Live Sync ON — will push UEFN saves to Blender (port {_blender_server_port})")
     else:
         _log("Live Sync OFF")
-    return {"live": _live_sync_active}
+    return {"live": _live_sync_active, "blender_port": _blender_server_port}
 
 
 @_reg("request_push_transforms")
@@ -2012,14 +2014,19 @@ class Dashboard:
                     self._poll_next = now + LIVE_POLL_INTERVAL
                     try:
                         any_dirty = _any_bb_dirty()
-                        if self._was_dirty and not any_dirty:
-                            all_transforms = _read_bb_transforms()
-                            if all_transforms:
-                                changed = _diff_transforms(all_transforms)
+                        if any_dirty != self._was_dirty:
+                            if any_dirty:
+                                _log("UEFN edits detected (unsaved) — will push on Ctrl+S")
+                            else:
+                                # dirty -> clean = a save happened
+                                all_transforms = _read_bb_transforms()
+                                changed = _diff_transforms(all_transforms) if all_transforms else []
                                 if changed:
-                                    _log(f"Level saved — pushing {len(changed)} change(s) to Blender")
+                                    _log(f"Saved — pushing {len(changed)} change(s) to Blender")
                                     _push_to_blender(_blender_server_port, changed)
-                        self._was_dirty = any_dirty
+                                else:
+                                    _log("Saved — no Blender-relevant changes")
+                            self._was_dirty = any_dirty
                     except Exception:
                         pass
 

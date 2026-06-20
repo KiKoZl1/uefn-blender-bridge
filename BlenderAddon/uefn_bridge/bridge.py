@@ -1190,6 +1190,14 @@ def do_connect():
             bpy.app.timers.register(_process_incoming, first_interval=0.5,
                                     persistent=True)
 
+        # If Live Sync was already on (e.g. reconnecting after re-running the UEFN script),
+        # re-assert it so UEFN gets our port + live flag back.
+        if _st.live_active:
+            try:
+                _send("set_live_sync", {"active": True, "blender_port": _st.server_port})
+            except Exception:
+                pass
+
         return True
     except Exception as e:
         _st.status = f"Failed: {e}"
@@ -1569,9 +1577,10 @@ def do_start_live():
     _st.last_object_names = set(_st.last_obj_hashes.keys())
     if _on_save not in bpy.app.handlers.save_post:
         bpy.app.handlers.save_post.append(_on_save)
-    # Tell UEFN to start pushing actor edits back to us (bidirectional live sync).
+    # Tell UEFN to start pushing actor edits back to us (bidirectional live sync). Send our
+    # server port too, so this re-establishes it even if the UEFN script was re-run.
     try:
-        _send("set_live_sync", {"active": True})
+        _send("set_live_sync", {"active": True, "blender_port": _st.server_port})
     except Exception as e:
         _err(f"Could not enable UEFN->Blender live sync: {e}")
     _st.status = "Live: Blender⇄UEFN"
