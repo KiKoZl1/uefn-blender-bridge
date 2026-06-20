@@ -397,95 +397,113 @@ def _ensure_sm_name(asset, base, dest_folder=None):
     return asset
 
 
+def _spawn_or_reuse(asub, asset, label, guid):
+    """Reuse an existing bridge actor (by GUID, then label) or spawn a new one — idempotent (B3).
+    Points it at `asset` and stamps the label + GUID tag. Returns the actor (or None on failure)."""
+    existing = (_find_actor_by_guid(asub, guid) if guid else None) \
+        or _find_actor_by_label(asub, label)
+    if existing:
+        comp = existing.static_mesh_component
+        if comp:
+            comp.set_static_mesh(asset)
+        actor = existing
+    else:
+        actor = asub.spawn_actor_from_object(asset, unreal.Vector(0, 0, 0))
+        if not actor:
+            _log(f"  Spawn failed: {label}", "warning")
+            return None
+    actor.set_actor_label(label)
+    if guid:
+        actor.tags = [unreal.Name(f"BB_GUID:{guid}")]
+    return actor
+
+
+def _apply_obj_transform(actor, od):
+    """Apply the per-object WORLD transform Blender sent (already in UE coords) + Outliner folder.
+    Placement mirrors the Blender position — never a camera offset."""
+    loc = od.get("location", [0, 0, 0])
+    rot = od.get("rotation", [0, 0, 0])   # [pitch, yaw, roll]
+    scale = od.get("scale", [1, 1, 1])
+    collection = od.get("collection", "")
+    actor.set_actor_location(unreal.Vector(loc[0], loc[1], loc[2]), False, False)
+    actor.set_actor_rotation(unreal.Rotator(pitch=rot[0], yaw=rot[1], roll=rot[2]), False)
+    actor.set_actor_scale3d(unreal.Vector(scale[0], scale[1], scale[2]))
+    actor.set_folder_path(f"/BlenderBridge/{collection}" if collection else "/BlenderBridge")
+
+
 def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
+    """Place actors. OBJECT-DRIVEN: each object references a (possibly shared) StaticMesh via its
+    'mesh' field — N Blender objects sharing one mesh datablock spawn N actors off ONE imported
+    mesh (instancing — F-44). Falls back to one-actor-per-mesh when no object data is given."""
     asub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     actors = []
 
-    # Build lookup: FBX-style name (dots→underscores) → object data
-    obj_by_fbx = {}
-    if object_data:
-        for od in object_data:
-            bname = od.get("name", "")
-            fbx_name = bname.replace(".", "_")
-            obj_by_fbx[fbx_name] = od
-
-    for i, path in enumerate(asset_paths):
+    # Load imported StaticMeshes, keyed by FBX-style source name (dots->underscores).
+    mesh_by_name = {}
+    for path in asset_paths:
         try:
             asset = unreal.load_asset(str(path))
             if not asset:
                 clean = str(path).split(" ")[-1] if " " in str(path) else str(path)
                 asset = unreal.load_asset(clean)
-
-            if not asset:
-                _log(f"  Could not load: {path}", "warning")
+            if not asset or not isinstance(asset, unreal.StaticMesh):
                 continue
-            if not isinstance(asset, unreal.StaticMesh):
-                _log(f"  Not StaticMesh: {path} ({type(asset).__name__})", "warning")
-                continue
+            mesh_by_name[str(path).split("/")[-1].split(".")[0]] = asset
+        except Exception as e:
+            _log(f"  Load error: {path}: {e}", "warning")
 
-            # Resolve target object + label BEFORE spawning, so we can REUSE an existing
-            # bridge actor instead of creating a duplicate (idempotent — F-44).
-            asset_name = str(path).split("/")[-1].split(".")[0]
-            od = obj_by_fbx.get(asset_name)
-            # Fallback: a single imported mesh maps to the single sent object even when
-            # the asset name differs (e.g. a combined export named "scene").
-            if od is None and object_data and len(object_data) == 1:
-                od = object_data[0]
+    if not mesh_by_name:
+        _log("  No StaticMeshes to place", "warning")
+        return actors
 
-            bname = od.get("name", "") if od else asset_name
-            guid = od.get("guid", "") if od else ""
-            collection = od.get("collection", "") if od else ""
+    def _resolve(key):
+        k = (key or "").replace(".", "_")
+        if k in mesh_by_name:
+            return k, mesh_by_name[k]
+        if len(mesh_by_name) == 1:   # combined/single-mesh export fallback
+            return next(iter(mesh_by_name.items()))
+        return None, None
+
+    if not object_data:
+        # Legacy fallback: one actor per imported mesh.
+        for name, asset in list(mesh_by_name.items()):
+            asset = _ensure_sm_name(asset, name, _mesh_dir())
+            actor = _spawn_or_reuse(asub, asset, f"{ACTOR_PREFIX}{name}", "")
+            if actor:
+                actor.set_folder_path("/BlenderBridge")
+                actors.append(actor)
+        _log(f"Placed {len(actors)} actor(s)")
+        return actors
+
+    renamed = {}  # mesh key -> StaticMesh after SM_/collection rename (once per shared mesh)
+    for od in object_data:
+        try:
+            bname = od.get("name", "")
+            guid = od.get("guid", "")
+            collection = od.get("collection", "")
+            mesh_key = od.get("mesh", bname)   # representative name (instancing)
             label = f"{ACTOR_PREFIX}{bname}"
 
-            # UE naming + collection subfolder (F-43/F-16): move to <Meshes>/<collection>/SM_<name>
-            # (mirrors the Blender collection tree), reusing an existing asset there (dedup F-44).
-            dest_folder = _collection_folder(_mesh_dir(), collection)
-            asset = _ensure_sm_name(asset, bname.replace(".", "_"), dest_folder)
+            rk, asset = _resolve(mesh_key)
+            if not asset:
+                _log(f"  No mesh '{mesh_key}' for object '{bname}'", "warning")
+                continue
 
-            # Match an existing actor by GUID first (survives rename), then by label (B3).
-            existing = (_find_actor_by_guid(asub, guid) if guid else None) \
-                or _find_actor_by_label(asub, label)
-            if existing:
-                comp = existing.static_mesh_component
-                if comp:
-                    comp.set_static_mesh(asset)
-                actor = existing
-                reused = True
+            # Name/move the shared StaticMesh ONCE: <Meshes>/<collection>/SM_<rep> (F-16/F-43).
+            if rk in renamed:
+                asset = renamed[rk]
             else:
-                actor = asub.spawn_actor_from_object(asset, unreal.Vector(0, 0, 0))
-                if not actor:
-                    _log(f"  Spawn failed: {path}", "warning")
-                    continue
-                reused = False
-            actor.set_actor_label(label)
-            if guid:
-                actor.tags = [unreal.Name(f"BB_GUID:{guid}")]
+                asset = _ensure_sm_name(asset, mesh_key.replace(".", "_"),
+                                        _collection_folder(_mesh_dir(), collection))
+                renamed[rk] = asset
+                mesh_by_name[rk] = asset
 
-            # Apply the per-object WORLD transform Blender sent (already in UE coords).
-            # Placement must mirror the Blender position — never a camera offset.
-            if od:
-                loc = od.get("location", [0, 0, 0])
-                rot = od.get("rotation", [0, 0, 0])   # [pitch, yaw, roll]
-                scale = od.get("scale", [1, 1, 1])
-
-                actor.set_actor_location(
-                    unreal.Vector(loc[0], loc[1], loc[2]), False, False)
-                actor.set_actor_rotation(
-                    unreal.Rotator(pitch=rot[0], yaw=rot[1], roll=rot[2]), False)
-                actor.set_actor_scale3d(
-                    unreal.Vector(scale[0], scale[1], scale[2]))
-
-                actor.set_folder_path(
-                    f"/BlenderBridge/{collection}" if collection else "/BlenderBridge")
-            elif not reused:
-                # Unmatched NEW mesh — keep at origin (deterministic), never camera offset.
-                _log(f"  No per-object match for '{asset_name}' — placed at origin", "warning")
-                actor.set_actor_location(unreal.Vector(0, 0, 0), False, False)
-                actor.set_folder_path("/BlenderBridge")
-
+            actor = _spawn_or_reuse(asub, asset, label, guid)
+            if not actor:
+                continue
+            _apply_obj_transform(actor, od)
             actors.append(actor)
-            _log(f"{'Updated' if reused else 'Placed'}: {label} (mesh: {asset_name})")
-
+            _log(f"Placed: {label} (mesh: {mesh_key})")
         except Exception as e:
             _log(f"Place error: {e}", "warning")
 
@@ -1084,31 +1102,24 @@ def _add_objects_cmd(fbx_paths=None, objects=None, scene_name="Scene",
 
     mesh_dest = _mesh_dir(scene_name)
     obj_data = objects or []
-    added = 0
 
+    # Import each rep mesh FBX (one per unique datablock), collect all StaticMeshes, then place
+    # ALL objects together so instances can reference a shared mesh (object-driven — F-44).
+    all_mesh_paths = []
     for obj_name, fbx_path in fbx_paths.items():
         if not os.path.exists(fbx_path):
             _log(f"  FBX not found for {obj_name}: {fbx_path}", "warning")
             continue
-
         imported = _import_fbx(fbx_path, mesh_dest, combine=False)
-        mesh_paths = [p for p in imported if "StaticMesh" in _asset_class(p)]
-        if not mesh_paths:
-            _log(f"  No mesh imported for {obj_name}", "warning")
-            continue
+        all_mesh_paths += [p for p in imported if "StaticMesh" in _asset_class(p)]
 
-        # Find matching object data
-        od = None
-        for o in obj_data:
-            if o.get("name") == obj_name:
-                od = o
-                break
+    if not all_mesh_paths:
+        _log("  No meshes imported", "warning")
+        return {"added": 0}
 
-        actors = _place_meshes(mesh_paths, [od] if od else None, scene_name)
-        added += len(actors)
-
-    _log(f"Added {added} object(s)")
-    return {"added": added}
+    actors = _place_meshes(all_mesh_paths, obj_data, scene_name)
+    _log(f"Added {len(actors)} object(s)")
+    return {"added": len(actors)}
 
 
 @_reg("remove_objects")
@@ -1131,34 +1142,28 @@ def _update_objects_cmd(fbx_paths=None, objects=None, scene_name="Scene",
 
     mesh_dest = _mesh_dir(scene_name)
     obj_data = objects or []
-    updated = 0
 
-    # Remove old actors for these objects
-    names_to_update = list(fbx_paths.keys())
-    _cleanup_actors(set(names_to_update))
+    # Remove old actors for ALL objects being updated (not just the rep FBX names) — actors are
+    # labeled by object name, and instances share a rep FBX.
+    names_to_update = [od.get("name", "") for od in obj_data] or list(fbx_paths.keys())
+    _cleanup_actors(set(n for n in names_to_update if n))
 
+    # Re-import each rep mesh, then re-place ALL objects together (object-driven — F-44).
+    all_mesh_paths = []
     for obj_name, fbx_path in fbx_paths.items():
         if not os.path.exists(fbx_path):
             _log(f"  FBX not found for {obj_name}: {fbx_path}", "warning")
             continue
-
         imported = _import_fbx(fbx_path, mesh_dest, combine=False)
-        mesh_paths = [p for p in imported if "StaticMesh" in _asset_class(p)]
-        if not mesh_paths:
-            _log(f"  No mesh imported for {obj_name}", "warning")
-            continue
+        all_mesh_paths += [p for p in imported if "StaticMesh" in _asset_class(p)]
 
-        od = None
-        for o in obj_data:
-            if o.get("name") == obj_name:
-                od = o
-                break
+    if not all_mesh_paths:
+        _log("  No meshes imported", "warning")
+        return {"updated": 0}
 
-        actors = _place_meshes(mesh_paths, [od] if od else None, scene_name)
-        updated += len(actors)
-
-    _log(f"Updated {updated} object(s)")
-    return {"updated": updated}
+    actors = _place_meshes(all_mesh_paths, obj_data, scene_name)
+    _log(f"Updated {len(actors)} object(s)")
+    return {"updated": len(actors)}
 
 
 @_reg("update_materials")

@@ -918,6 +918,13 @@ def _export_fbx(selected_only=False):
     # parent was cleared and that scale folded into local).
     selected_meshes = [o for o in bpy.context.scene.objects
                        if o.select_get() and o.type == "MESH"]
+    # Instancing (F-44): export only ONE object per unique mesh datablock (the representative);
+    # linked duplicates reference it via their "mesh" field and become extra actors in UEFN.
+    rep_names = set(_mesh_rep_map(selected_meshes).values())
+    for o in selected_meshes:
+        if o.name not in rep_names:
+            o.select_set(False)
+    selected_meshes = [o for o in selected_meshes if o.name in rep_names]
     saved = {}
     for o in selected_meshes:
         saved[o.name] = (o.location.copy(), o.rotation_euler.copy(),
@@ -972,7 +979,12 @@ def _export_fbx_objects(obj_names):
 
     all_objs = {o.name: o for o in bpy.context.scene.objects if o.type == "MESH"}
 
-    for name in obj_names:
+    # Instancing (F-44): export one FBX per unique mesh datablock (the representative); the other
+    # sharers reference it via their "mesh" field in _obj_data and become extra actors in UEFN.
+    sel_objs = [all_objs[n] for n in obj_names if n in all_objs]
+    rep_names = sorted(set(_mesh_rep_map(sel_objs).values()))
+
+    for name in rep_names:
         obj = all_objs.get(name)
         if not obj:
             continue
@@ -1102,6 +1114,20 @@ def _get_collection_path(obj):
     return max(paths, key=lambda p: p.count("/"))
 
 
+def _mesh_rep_map(objects):
+    """Map each mesh datablock name -> its REPRESENTATIVE object name (min name) among `objects`.
+    Objects sharing a datablock (linked duplicates) resolve to one representative, so they export
+    ONE mesh and spawn N actors in UEFN (instancing — F-44)."""
+    rep = {}
+    for o in objects:
+        if o.type != "MESH" or not o.data:
+            continue
+        key = o.data.name
+        if key not in rep or o.name < rep[key]:
+            rep[key] = o.name
+    return rep
+
+
 def _obj_data(objects):
     """Build object data list with Blender→UE coordinate conversion.
 
@@ -1118,6 +1144,7 @@ def _obj_data(objects):
     # Flush the depsgraph so matrix_world is current (see _snapshot_all) — guarantees we send
     # the just-edited transform, not a stale one, on the send_selected/send_scene paths too.
     bpy.context.view_layer.update()
+    reps = _mesh_rep_map(objects)   # instancing (F-44): shared datablock -> one representative
     result = []
     for o in objects:
         mw = o.matrix_world.copy()
@@ -1134,6 +1161,8 @@ def _obj_data(objects):
         result.append({
             "name": o.name,
             "guid": guid,
+            # Representative mesh name for this object's datablock — instances share it (F-44).
+            "mesh": reps.get(o.data.name, o.name) if o.data else o.name,
             "collection": _get_collection_path(o),
             "location": coords.loc_bl_to_ue(loc.x, loc.y, loc.z),
             # DATA-DRIVEN: mesh is exported clean (no baked rotation), the actor carries the
