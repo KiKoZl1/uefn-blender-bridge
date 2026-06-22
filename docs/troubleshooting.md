@@ -21,7 +21,7 @@ The UEFN side isn't running.
 4. Verify the Dashboard window opens and shows `Listening on port 8790`
 5. Try connecting from Blender again
 
-### "Listening on port 8791" but UEFN never registers Blender
+### "Listening on port 8790" but UEFN never registers Blender
 
 This usually means a firewall is blocking `localhost` traffic.
 
@@ -43,7 +43,7 @@ respectively. If all five fail, you'll see an error in the console.
 
 ## Sync problems
 
-### Send Scene runs but nothing appears in UEFN
+### Send Full Scene runs but nothing appears in UEFN
 
 Check the UEFN Dashboard log for an error. Most common causes:
 
@@ -52,7 +52,7 @@ Check the UEFN Dashboard log for an error. Most common causes:
   with the project actually open (not just on the Project Browser).
 - **No selected scene to import.** The bridge writes FBX to a temp folder
   and tells UEFN where to find it. If the temp folder is gone (cleaned by
-  Windows), import fails. Just click Send Scene again.
+  Windows), import fails. Just click Send Full Scene again.
 
 ### Materials don't have textures in UEFN
 
@@ -62,7 +62,7 @@ is broken (relative path to a deleted file).
 **Fix:**
 - In Blender: `File > External Data > Find Missing Files` and re-link
 - Or pack textures: `File > External Data > Automatically Pack Resources`
-- Then Send Scene again
+- Then Send Full Scene again
 
 ### Live Sync isn't picking up Ctrl+S
 
@@ -74,9 +74,10 @@ Live Sync must be **explicitly enabled** — clicking Connect is not enough.
 3. The status should show "Active"
 4. Now `Ctrl+S` will trigger sync
 
-### Bidirectional sync from UEFN to Blender doesn't fire on Ctrl+S
+### Edits in UEFN don't reflect back in Blender on Ctrl+S
 
-A few things to check:
+Two-way sync is live: editing a `BB_` actor in UEFN and pressing `Ctrl+S`
+pushes the change back to Blender. If it isn't firing:
 
 - **Is the UEFN Dashboard window still open?** If you closed it, the bridge
   is gone — re-run the script.
@@ -84,42 +85,26 @@ A few things to check:
   number (8791-8795). If it shows 0, disconnect and reconnect from Blender.
 - **Did anything actually change?** The UEFN side only pushes when something
   is dirty. If you saved without moving anything, nothing gets sent.
-- **First-time gotcha:** the very first save after connecting may need a
-  manual **Push to Blender** click from the Dashboard to seed the snapshot.
-
-### Duplicating an actor in UEFN doesn't appear in Blender
-
-This is a **known limitation** in v0.5.0-beta. The UEFN→Blender direction
-only handles transforms of existing `BB_` actors, not new ones.
-
-**Workaround:** create the duplicate in Blender instead, save → it'll
-appear in UEFN.
 
 ---
 
 ## Coordinate / orientation problems
 
-### Mesh appears rotated 90° or upside down in UEFN
+Rotation and scale are handled by a **data-driven transform**: the mesh is
+exported pure (no baked transform) and the UEFN actor carries the full world
+location, rotation, and scale. This is correct for any object — parented,
+unparented, or scaled — so the old 90°-rotation and "100x too big/too small"
+problems no longer occur.
 
-This *should not* happen with the default export settings. The bridge uses
-`bake_space_transform=True` and UEFN imports with `convert_scene=False`,
-which together produce a clean Y-up to Z-up conversion.
+### A mesh still looks wrong in UEFN
 
-If it's still wrong:
+If a single object lands in an unexpected place or orientation, the most
+likely cause is the object's own transform in Blender, not the bridge.
 
-- **Check the mesh's transform in Blender.** If you applied a custom rotation
-  in Object mode but didn't apply transforms (`Ctrl+A > Rotation & Scale`),
-  the FBX exporter and importer disagree about the basis.
-- **Fix:** select the object, `Ctrl+A > All Transforms`, save, re-sync.
-
-### Scale is 100x too big or too small
-
-Blender's unit system might be set to something other than meters.
-
-**Fix:**
-- `Properties > Scene > Units > Unit System: Metric`
-- `Length: Meters`
-- `Unit Scale: 1.0`
+- **Check the object's transform in Blender.** Confirm its location,
+  rotation, and scale are what you expect in the N-panel `Item` tab.
+- **Re-sync.** Move or touch the object, save (`Ctrl+S`), and the corrected
+  world transform is pushed to the UEFN actor.
 
 ---
 
@@ -133,7 +118,7 @@ If something interrupted that step, the MI references a missing parent.
 **Fix:**
 - In UEFN: delete the broken MI under
   `Content/{Project}/BlenderBridge/{Name}/Materials/`
-- Run **Send Scene** again from Blender
+- Run **Send Full Scene** again from Blender
 
 ### Texture-only sync doesn't update the texture in UEFN
 
@@ -141,7 +126,7 @@ The bridge tries to rebind the existing Material Instance. If it can't find
 the MI, it falls back to re-importing materials.
 
 **Fix:**
-- Try Send Scene (full sync) once to recreate everything
+- Try Send Full Scene once to recreate everything
 - Then texture-only sync should work on subsequent saves
 
 ---
@@ -178,7 +163,7 @@ If everything is broken:
 2. Delete temp folder: `%TEMP%\UEFNBlenderBridge\`
 3. In UEFN: delete `Content/{Project}/BlenderBridge/{ProjectName}/` (the
    whole folder for your bridge project)
-4. Reopen both apps, reconnect, Send Scene fresh
+4. Reopen both apps, reconnect, Send Full Scene fresh
 
 This is destructive — you'll lose any custom edits you made on the UEFN
 side under `BlenderBridge/`. Make sure that's OK before doing it.
