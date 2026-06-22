@@ -36,7 +36,7 @@ UEFN_PORT = 8790
 BLENDER_SERVER_PORT = 8791
 BLENDER_MAX_PORT = 8795
 EXCHANGE_DIR = os.path.join(tempfile.gettempdir(), "UEFNBlenderBridge")
-ADDON_VERSION = "0.5.0-beta"
+ADDON_VERSION = "1.0.0"
 
 # ============================================================
 # STATE

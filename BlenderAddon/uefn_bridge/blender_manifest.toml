@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "uefn_bridge"
-version = "0.5.0-beta"
+version = "1.0.0"
 name = "UEFN Blender Bridge"
 tagline = "Live two-way bridge from Blender to UEFN"
 maintainer = "KiKoZl (Surprise Co.) <all@surpriseugc.com>"

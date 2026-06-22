@@ -1,10 +1,10 @@
 bl_info = {
     "name": "UEFN Blender Bridge",
     "author": "KiKoZl (Surprise Co.)",
-    "version": (0, 5, 0),
+    "version": (1, 0, 0),
     "blender": (3, 6, 0),
     "location": "View3D > Sidebar > UEFN",
-    "description": "Live bridge from Blender to UEFN — FBX export, materials, textures, and live sync (beta)",
+    "description": "Two-way live bridge between Blender and UEFN — meshes, PBR materials, LOD, instancing, and bidirectional sync",
     "category": "Import-Export",
     "doc_url": "https://github.com/KiKoZl1/uefn-blender-bridge",
     "tracker_url": "https://github.com/KiKoZl1/uefn-blender-bridge/issues",
