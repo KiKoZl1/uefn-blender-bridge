@@ -535,15 +535,24 @@ def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
 # ============================================================
 
 def _cleanup_actors(names=None):
+    """Remove this bridge PROJECT's actors only. SAFETY: scoped to the project's Outliner folder
+    (/BlenderBridge/<project>/...) so it never nukes another .blend project's actors — or any
+    unrelated BB_-named actor. If a folder can't be read, the actor is left alone (never deleted)."""
     asub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    proj_folder = f"/BlenderBridge/{_bridge_project}" if _bridge_project else "/BlenderBridge"
     to_remove = []
     for actor in asub.get_all_level_actors():
         label = actor.get_actor_label()
         if not label or not label.startswith(ACTOR_PREFIX):
             continue
+        try:
+            fp = str(actor.get_folder_path())
+        except Exception:
+            fp = ""
+        if not fp.startswith(proj_folder):
+            continue
         if names:
-            obj_name = label[len(ACTOR_PREFIX):]
-            if obj_name in names:
+            if label[len(ACTOR_PREFIX):] in names:
                 to_remove.append(actor)
         else:
             to_remove.append(actor)
@@ -1746,23 +1755,21 @@ def _push_transforms_to_blender_cmd(**kw):
 @_reg("clean_all")
 def _clean_all_cmd(**kw):
     if not kw.get("confirm"):
-        return {"error": "clean_all requires confirm=True (destructive: deletes BB_ actors + imported assets)"}
+        return {"error": "clean_all requires confirm=True (destructive: deletes this project's "
+                         "BB_ actors + its BlenderBridge assets)"}
+    # SCOPED to THIS bridge project only: its actors (by folder) + its asset root
+    # /BlenderBridge/<project>. Never touches other projects or the rest of the level.
     count = _cleanup_actors()
-    # Clean assets from THIS session's imports (Meshes, Materials, Textures)
-    cleaned_folders = []
-    for scene_name in list(_imported_scenes.keys()):
-        for dir_fn in (_mesh_dir, _mat_dir, _tex_dir):
-            dest = dir_fn(scene_name)
-            _cleanup_assets(dest)
-            try:
-                if _asset_lib().does_directory_exist(dest):
-                    _asset_lib().delete_directory(dest)
-            except Exception:
-                pass
-        cleaned_folders.append(scene_name)
+    base = _base_dir()
+    try:
+        if _asset_lib().does_directory_exist(base):
+            _cleanup_assets(base)
+            _asset_lib().delete_directory(base)
+    except Exception as e:
+        _log(f"  asset cleanup error: {e}", "warning")
     _imported_scenes.clear()
-    _log(f"Cleaned: {count} actor(s), {len(cleaned_folders)} scene(s)")
-    return {"cleaned": count, "folders": len(cleaned_folders)}
+    _log(f"Cleaned project '{_bridge_project}': {count} actor(s) + assets")
+    return {"cleaned": count, "project": _bridge_project}
 
 
 @_reg("execute_python")

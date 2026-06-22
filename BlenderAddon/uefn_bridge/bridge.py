@@ -1811,15 +1811,16 @@ class UEFNBRIDGE_OT_stop_live(bpy.types.Operator):
 
 class UEFNBRIDGE_OT_clean(bpy.types.Operator):
     bl_idname = "uefn_bridge.clean"
-    bl_label = "Clean All in UEFN"
-    bl_description = "Remove all bridge-imported actors and assets from UEFN"
+    bl_label = "Clean THIS Project in UEFN"
+    bl_description = ("Remove THIS project's bridge actors + its BlenderBridge/<project> assets "
+                     "from UEFN. Scoped to this .blend — never touches other projects")
 
     @classmethod
     def poll(cls, context):
         return _st.connected
 
     def invoke(self, context, event):
-        # Destructive (hard-deletes BB_ actors + imported assets in UEFN) — confirm first.
+        # Destructive (hard-deletes THIS project's BB_ actors + assets) — confirm first.
         return context.window_manager.invoke_confirm(self, event)
 
     def execute(self, context):
