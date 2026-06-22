@@ -48,10 +48,12 @@ class BridgeState:
     host = UEFN_HOST
     port = UEFN_PORT
     status = "Disconnected"
+    last_error = ""            # last error message, surfaced in the panel until next action
     last_obj_hashes = {}       # {name: {"geo","mat","tex","trans"}}
     last_object_names = set()  # set of obj names from last sync
     last_send_time = 0.0
     live_active = False
+    sending = False            # True while an async send is in flight (one at a time)
     send_count = 0
     project_path = ""
     project_name = ""          # bridge project name (folder in UEFN)
@@ -74,6 +76,7 @@ def _log(m):
 
 
 def _err(m):
+    _st.last_error = str(m)
     print(f"[UEFNBridge ERROR] {m}")
 
 # ============================================================
@@ -99,6 +102,31 @@ def _send(cmd, params=None, timeout=120.0):
     if not body.get("success", False):
         raise RuntimeError(f"UEFN: {body.get('error', '?')}")
     return body.get("result", {})
+
+
+def _send_async(cmd, params=None, label="Sent"):
+    """Run _send on a daemon thread so the Blender UI doesn't freeze while UEFN imports (the slow
+    part). ONLY the network call is threaded — no bpy is touched off the main thread. Status and
+    last_error are plain string assignments (GIL-atomic). One send in flight at a time (_st.sending;
+    the panel redraw is nudged by the _process_incoming timer on the main thread)."""
+    _st.sending = True
+    _st.status = "Sending to UEFN..."
+
+    def _worker():
+        try:
+            r = _send(cmd, params, timeout=600.0)
+            ac = r.get("actors", r.get("updated", r.get("added", 0)))
+            _st.status = f"{label}: {ac}"
+            _st.last_error = ""
+            _st.send_count += 1
+            _st.last_send_time = time.time()
+        except Exception as e:
+            _st.status = f"Send failed: {e}"
+            _err(f"Send error: {e}")
+        finally:
+            _st.sending = False
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def _alive():
@@ -249,6 +277,16 @@ def _process_incoming():
                 _apply_incoming_transforms(params)
     except Exception as e:
         _err(f"Incoming process error: {e}")
+    # Redraw panels while an async send is in flight so its status updates show live (this runs
+    # on the main thread — safe to touch bpy, unlike the send worker).
+    if _st.sending:
+        try:
+            for win in bpy.context.window_manager.windows:
+                for area in win.screen.areas:
+                    if area.type == "VIEW_3D":
+                        area.tag_redraw()
+        except Exception:
+            pass
     return 0.1  # re-run every 100ms
 
 
@@ -874,30 +912,6 @@ def _export_material_info(tex_paths):
     return mat_json
 
 
-def _apply_rotation_scale(objects):
-    """Apply rotation & scale to mesh objects (preserves user pivot)."""
-    prev_active = bpy.context.view_layer.objects.active
-    prev_selected = [o for o in bpy.context.scene.objects if o.select_get()]
-    prev_mode = bpy.context.mode
-    if prev_mode != "OBJECT":
-        bpy.ops.object.mode_set(mode="OBJECT")
-
-    bpy.ops.object.select_all(action="DESELECT")
-    for o in objects:
-        if o.type == "MESH":
-            o.select_set(True)
-    if objects:
-        bpy.context.view_layer.objects.active = objects[0]
-
-    bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
-
-    # Restore selection
-    bpy.ops.object.select_all(action="DESELECT")
-    for o in prev_selected:
-        o.select_set(True)
-    bpy.context.view_layer.objects.active = prev_active
-
-
 def _export_fbx(selected_only=False):
     """Export FBX. selected_only=True exports current selection only."""
     filepath = os.path.join(EXCHANGE_DIR, "scene.fbx")
@@ -1220,6 +1234,7 @@ def do_connect():
              "project folder, so your assets stay in one stable place.")
         return False
 
+    _st.last_error = ""
     _st.status = "Connecting..."
     _log(f"Connecting to UEFN at {_url()}...")
 
@@ -1290,7 +1305,11 @@ def do_send_scene(is_live=False):
     """Export full scene and send to UEFN."""
     if not _st.connected:
         return False
+    if _st.sending:
+        _st.status = "Busy — a send is already in progress"
+        return False
 
+    _st.last_error = ""
     _st.status = "Live sync..." if is_live else "Exporting..."
 
     # Capture world transforms BEFORE export (export may modify them)
@@ -1316,25 +1335,20 @@ def do_send_scene(is_live=False):
         "combine_meshes": combine,
     }
 
-    try:
-        r = _send("import_scene", params)
-        _st.last_obj_hashes = _snapshot_all()
-        _st.last_object_names = set(_st.last_obj_hashes.keys())
-        _st.last_send_time = time.time()
-        _st.send_count += 1
-        ac = r.get("actors", 0)
-        _st.status = f"Live: {ac} actors" if is_live else f"Sent: {ac} actors"
-        _log(f"Scene sent: {ac} actors, {r.get('materials', 0)} materials")
-        return True
-    except Exception as e:
-        _st.status = f"Send failed: {e}"
-        _err(f"Send scene error: {e}")
-        return False
+    # Snapshot the baseline NOW (main thread) — we're sending the current state. The HTTP send
+    # runs async so the UI doesn't freeze while UEFN imports.
+    _st.last_obj_hashes = _snapshot_all()
+    _st.last_object_names = set(_st.last_obj_hashes.keys())
+    _send_async("import_scene", params, "Live" if is_live else "Sent")
+    return True
 
 
 def do_send_selected():
     """Export selected objects and send to UEFN."""
     if not _st.connected:
+        return False
+    if _st.sending:
+        _st.status = "Busy — a send is already in progress"
         return False
 
     selected = _collect_selected_meshes()
@@ -1342,6 +1356,7 @@ def do_send_selected():
         _st.status = "No mesh selected"
         return False
 
+    _st.last_error = ""
     _st.status = "Exporting selected..."
 
     # Capture world transforms BEFORE export (export may modify them)
@@ -1379,22 +1394,17 @@ def do_send_selected():
         "combine_meshes": combine,
     }
 
-    try:
-        r = _send("import_scene", params)
-        _st.send_count += 1
-        ac = r.get("actors", 0)
-        _st.status = f"Sent {ac} selected"
-        _log(f"Selected sent: {ac} actors")
-        return True
-    except Exception as e:
-        _st.status = f"Send failed: {e}"
-        _err(f"Send selected error: {e}")
-        return False
+    # Async HTTP send — UI stays responsive while UEFN imports.
+    _send_async("import_scene", params, "Sent selected")
+    return True
 
 
 def do_send_changes():
     """Smart diff sync — detects what changed and syncs only that."""
     if not _st.connected:
+        return False
+    if _st.sending:
+        _st.status = "Busy — a send is already in progress"
         return False
 
     new_snap = _snapshot_all()
@@ -1923,6 +1933,15 @@ class UEFNBRIDGE_PT_main(bpy.types.Panel):
             row.label(text="Disconnected", icon="X")
 
         box.label(text=_st.status, icon="INFO")
+
+        if _st.last_error:
+            ebox = box.box()
+            ebox.alert = True
+            ebox.label(text="Last error:", icon="ERROR")
+            for line in _st.last_error.split("\n"):
+                line = line.strip()
+                if line:
+                    ebox.label(text=line)
 
         if _st.project_name:
             box.label(text=f"Project: {_st.project_name}", icon="FILE_FOLDER")

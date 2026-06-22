@@ -359,19 +359,6 @@ def _import_fbx(fbx_path, dest_path, combine=False):
 # MESH PLACEMENT
 # ============================================================
 
-def _spawn_at_camera():
-    try:
-        loc, rot = unreal.get_editor_subsystem(
-            unreal.UnrealEditorSubsystem).get_level_viewport_camera_info()
-        yr = math.radians(rot.yaw)
-        pr = math.radians(rot.pitch)
-        return unreal.Vector(
-            loc.x + math.cos(pr) * math.cos(yr) * 500,
-            loc.y + math.cos(pr) * math.sin(yr) * 500,
-            loc.z + math.sin(pr) * 500
-        )
-    except Exception:
-        return unreal.Vector(0, 0, 0)
 
 
 def _find_actor_by_label(asub, label):
