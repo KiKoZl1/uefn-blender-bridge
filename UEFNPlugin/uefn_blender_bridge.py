@@ -915,9 +915,12 @@ def _apply_materials(obj_data, exchange_folder):
     if not mi_by_mat:
         return {}
 
-    # Assign MI_ per slot (over the embed material — validation-safe; embed stays as fallback).
+    # Assign MI_ per slot, on BOTH the component (per actor) AND the StaticMesh asset default
+    # (so the asset itself uses MI_ — the embed auto-materials become unreferenced and can be
+    # cleaned). The SM is set once (instanced actors share it).
     asub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     assigned = 0
+    sm_done = set()
     for od in obj_data:
         guid = od.get("guid", "")
         label = f"{ACTOR_PREFIX}{od.get('name', '')}"
@@ -926,17 +929,63 @@ def _apply_materials(obj_data, exchange_folder):
         comp = actor.static_mesh_component if actor else None
         if not comp:
             continue
-        for i, mname in enumerate(od.get("materials", [])):
-            mi = mi_by_mat.get(mname)
-            mat = _asset_lib().load_asset(mi) if mi else None
-            if mat:
+        mats = [(_asset_lib().load_asset(mi_by_mat[m]) if m in mi_by_mat else None)
+                for m in od.get("materials", [])]
+        sm = None
+        try:
+            sm = comp.get_editor_property("static_mesh")
+        except Exception:
+            pass
+        sp = sm.get_path_name().split(".")[0] if sm else None
+        do_sm = bool(sp) and sp not in sm_done
+        if do_sm:
+            sm_done.add(sp)
+        for i, mat in enumerate(mats):
+            if not mat:
+                continue
+            try:
+                comp.set_material(i, mat)
+                assigned += 1
+            except Exception:
+                pass
+            if do_sm:
                 try:
-                    comp.set_material(i, mat)
-                    assigned += 1
+                    sm.set_material(i, mat)
                 except Exception:
                     pass
+        if do_sm:
+            try:
+                _asset_lib().save_asset(sp)
+            except Exception:
+                pass
     _log(f"Materials: {len(mi_by_mat)} unique (master+MI), {assigned} slot(s) assigned")
     return mi_by_mat
+
+
+def _clean_staging(folder):
+    """Remove leftover NON-mesh assets from the import staging folder (the embed auto-materials,
+    now unreferenced after MI_ took over the StaticMesh), then drop the folder if it holds no
+    StaticMesh. NEVER deletes a StaticMesh (safety)."""
+    try:
+        if not _asset_lib().does_directory_exist(folder):
+            return
+        has_mesh = False
+        for a in list(_asset_lib().list_assets(folder, recursive=True)):
+            if "StaticMesh" in _asset_class(a):
+                has_mesh = True
+            else:
+                try:
+                    _asset_lib().delete_asset(str(a))
+                except Exception:
+                    pass
+        if not has_mesh:
+            try:
+                _asset_lib().delete_directory(folder)
+            except Exception:
+                pass
+        _log(f"  Cleaned staging: {folder}")
+    except Exception as e:
+        _log(f"  Staging cleanup skipped: {e}", "warning")
 
 # ============================================================
 # IMPORT TEXTURES + CREATE MATERIALS
@@ -1173,6 +1222,9 @@ def _import_scene_cmd(fbx_path="", scene_name="Scene", objects=None,
     # Build/assign per-material MM_/MI_ (deduped) in Materials/<collection>, OVER the embed
     # auto-material. Embed stays as a fallback during validation; disabled once approved.
     mat_map = _apply_materials(obj_data, exchange_folder)
+
+    # Drop the embed auto-materials left in the staging folder (MI_ now owns the SM slots).
+    _clean_staging(mesh_dest)
 
     _imported_scenes[scene_name] = {
         "actors": len(actors),
