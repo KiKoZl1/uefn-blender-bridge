@@ -944,11 +944,14 @@ def _export_fbx(selected_only=False):
     if selected_meshes:
         bpy.context.view_layer.objects.active = selected_meshes[0]
     # LOD (combined export): rename each <base>_LOD<N> member to LOD<xx>_<base> so UEFN/Interchange
-    # builds ONE StaticMesh <base> with LOD levels. Restored after export.
+    # builds ONE StaticMesh <base> with LOD levels. selected_meshes is already instance-deduped,
+    # so a forest collapses to one LOD0 + one LOD1 rep here. Restored after export.
     lod_member = {}   # original obj name -> (base, level)
-    for base, levels in _lod_groups(selected_meshes).items():
-        for lvl, o in levels.items():
-            lod_member[o.name] = (base, lvl)
+    _lb = _lod_bases(selected_meshes)
+    for o in selected_meshes:
+        p = _lod_parse(o.name)
+        if p and p[0] in _lb:
+            lod_member[o.name] = (p[0], p[1])
 
     saved = {}
     name_saved = []   # (obj, original_name) for LOD-renamed members
@@ -1162,29 +1165,36 @@ def _dedup_guids():
             seen.add(g)
 
 
-def _lod_key(name):
-    """('<base>', N) if `name` ends in _LOD<N> (case-insensitive), else None. e.g.
-    'Tree_1_1_LOD0' -> ('Tree_1_1', 0)."""
-    low = name.lower()
+def _lod_parse(name):
+    """(base, level, inst) for a LOD-named object, else None. Handles Blender's '.NNN' duplicate
+    suffix so a LOD'd mesh AND its instances group correctly:
+      'Tree_1_1_LOD0'      -> ('Tree_1_1', 0, '')        # original, level 0
+      'Tree_1_1_LOD0.001'  -> ('Tree_1_1', 0, '.001')    # instance .001, level 0
+      'Tree_1_1_LOD1.001'  -> ('Tree_1_1', 1, '.001')    # instance .001, level 1
+    So a forest of LOD'd trees = one base, N instances, each with its LOD levels."""
+    inst = ""
+    core = name
+    head, _, tail = name.rpartition(".")
+    if head and tail.isdigit():
+        core, inst = head, "." + tail
+    low = core.lower()
     idx = low.rfind("_lod")
     if idx < 0:
         return None
-    suffix = name[idx + 4:]
-    return (name[:idx], int(suffix)) if suffix.isdigit() else None
+    suf = core[idx + 4:]
+    return (core[:idx], int(suf), inst) if suf.isdigit() else None
 
 
-def _lod_groups(objects):
-    """{base: {level: obj}} for mesh objects named <base>_LOD<N> — but only true groups (2+
-    levels). UEFN/Interchange builds ONE StaticMesh with LODs when the FBX nodes are named
-    LOD<xx>_<base> (see _export_fbx). A lone _LOD0 is left as a normal mesh."""
-    groups = {}
+def _lod_bases(objects):
+    """Set of base names that form a real LOD group (2+ distinct levels across all instances)."""
+    levels = {}
     for o in objects:
         if o.type != "MESH":
             continue
-        k = _lod_key(o.name)
-        if k:
-            groups.setdefault(k[0], {})[k[1]] = o
-    return {b: lv for b, lv in groups.items() if len(lv) >= 2}
+        p = _lod_parse(o.name)
+        if p:
+            levels.setdefault(p[0], set()).add(p[1])
+    return {b for b, lv in levels.items() if len(lv) >= 2}
 
 
 def _mesh_rep_map(objects):
@@ -1220,19 +1230,27 @@ def _obj_data(objects):
     _dedup_guids()                  # duplicates (Alt+D/Shift+D) inherit bb_guid -> give fresh ones
     reps = _mesh_rep_map(objects)   # instancing (F-44): shared datablock -> one representative
 
-    # LOD collapse: a <base>_LOD<N> group becomes ONE entry (named <base>, LOD0's transform) and
-    # ONE actor — UEFN builds the LOD'd StaticMesh <base> from the LOD<xx>_<base> FBX nodes.
-    lod = _lod_groups(objects)
-    lod_primary = {}        # primary obj name -> base name
-    lod_members = set()     # all LOD-member obj names
-    for base, levels in lod.items():
-        lod_primary[levels[min(levels)].name] = base
-        lod_members.update(o.name for o in levels.values())
+    # LOD + instance: group LOD members by (base, instance). Each instance becomes ONE actor
+    # entry (name base[+.NNN], mesh=base, its LOD0 transform) and they ALL share SM_<base> —
+    # which the combined export builds (instance rep-dedup collapses the dups, LOD rename groups
+    # the levels). So a forest of LOD'd trees = N actors, ONE LOD'd StaticMesh.
+    lod_bases = _lod_bases(objects)
+    inst_levels = {}        # (base, inst) -> {level: obj}
+    for o in objects:
+        if o.type == "MESH":
+            p = _lod_parse(o.name)
+            if p and p[0] in lod_bases:
+                inst_levels.setdefault((p[0], p[2]), {})[p[1]] = o
+    lod_primary = {}        # primary (LOD0) obj name -> (base, inst)
+    lod_skip = set()        # every LOD-member obj name
+    for (base, inst), levels in inst_levels.items():
+        lod_skip.update(o.name for o in levels.values())
+        lod_primary[levels[min(levels)].name] = (base, inst)
 
     result = []
     for o in objects:
-        if o.name in lod_members and o.name not in lod_primary:
-            continue  # non-primary LOD level — folded into the primary's LOD chain
+        if o.name in lod_skip and o.name not in lod_primary:
+            continue  # non-primary LOD level — folded into its instance's LOD chain
         mw = o.matrix_world.copy()
         loc, rot_q, sc = mw.decompose()
         rot = rot_q.to_euler('XYZ')
@@ -1244,9 +1262,10 @@ def _obj_data(objects):
             guid = uuid.uuid4().hex
             o["bb_guid"] = guid
 
-        if o.name in lod_primary:           # LOD group → name/mesh = base
-            ename = lod_primary[o.name]
-            emesh = ename
+        if o.name in lod_primary:           # LOD instance → name base[+.NNN], mesh = base
+            base, inst = lod_primary[o.name]
+            ename = base + inst
+            emesh = base
         else:
             ename = o.name
             emesh = reps.get(o.data.name, o.name) if o.data else o.name
