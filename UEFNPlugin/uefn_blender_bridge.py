@@ -840,13 +840,22 @@ def _apply_materials(obj_data, exchange_folder):
         return {}
     _log(f"  MAT: materials.json has {len(mat_list)} entr(ies)")
 
+    # Only build materials the PLACED actors actually use (each object's slot list). This skips
+    # materials.json entries from folded-away LOD levels (e.g. a LOD1 mesh with duplicated
+    # 'Material_001.006' slots) — the StaticMesh takes its slots from LOD0, so those are noise.
+    needed = set()
+    for od in obj_data:
+        for m in od.get("materials", []):
+            if m:
+                needed.add(m)
+
     # Unique material -> {channel: local texture path} (filename channel, socket as fallback) +
     # color props (for texture-less materials, which build a color MI off the shared master).
     mat_tex = {}
     mat_props = {}
     for entry in mat_list:
         mname = entry.get("name", "")
-        if not mname:
+        if not mname or (needed and mname not in needed):
             continue
         chans = mat_tex.setdefault(mname, {})
         for sock, t in (entry.get("textures") or {}).items():
@@ -965,20 +974,19 @@ def _clean_staging(folder):
     try:
         if not _asset_lib().does_directory_exist(folder):
             return
-        has_mesh = False
-        for a in list(_asset_lib().list_assets(folder, recursive=True)):
-            if "StaticMesh" in _asset_class(a):
-                has_mesh = True
-            else:
-                try:
-                    _asset_lib().delete_asset(str(a))
-                except Exception:
-                    pass
-        if not has_mesh:
-            try:
-                _asset_lib().delete_directory(folder)
-            except Exception:
-                pass
+        assets = list(_asset_lib().list_assets(folder, recursive=True))
+        meshes = [a for a in assets if "StaticMesh" in _asset_class(a)]
+        if not meshes:
+            # Common case (SM already moved out): one delete_directory is far faster than
+            # deleting asset-by-asset (the per-asset path was the ~18s bottleneck).
+            _asset_lib().delete_directory(folder)
+        else:
+            for a in assets:
+                if a not in meshes:
+                    try:
+                        _asset_lib().delete_asset(str(a))
+                    except Exception:
+                        pass
         _log(f"  Cleaned staging: {folder}")
     except Exception as e:
         _log(f"  Staging cleanup skipped: {e}", "warning")
