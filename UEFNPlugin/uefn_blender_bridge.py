@@ -742,6 +742,110 @@ def _apply_material_to_actors(actors, mi_path):
     if count:
         _log(f"  Applied material to {count} actor(s)")
 
+
+def _socket_to_channel(socket):
+    """Fallback channel from a Blender Principled input socket (used only when the texture
+    filename has no channel suffix). Filename detection (_detect_channel) is primary."""
+    return {
+        "base color": "BaseColor", "color": "BaseColor", "normal": "Normal",
+        "roughness": "Roughness", "metallic": "Metallic", "specular": "Specular",
+        "specular ior level": "Specular", "emission": "Emissive",
+        "emission color": "Emissive", "alpha": "Opacity",
+    }.get((socket or "").lower())
+
+
+def _apply_materials(obj_data, exchange_folder):
+    """Build ONE master + instance per UNIQUE Blender material (deduped by name) and assign them
+    per slot to the actors. Material-driven: uses materials.json (material -> textures) + each
+    object's ordered slot list. Textures -> Textures/<collection>/T_<mat>_<ch>; materials ->
+    Materials/<collection>/{M_,MI_}<mat>. A material shared by N meshes => ONE MI_ reused."""
+    if not obj_data or not exchange_folder:
+        return {}
+    mat_json = os.path.join(exchange_folder, "materials.json")
+    if not os.path.exists(mat_json):
+        return {}
+    try:
+        with open(mat_json, "r") as f:
+            mat_list = json.load(f)
+    except Exception as e:
+        _log(f"  materials.json read failed: {e}", "warning")
+        return {}
+
+    # Unique material -> {channel: local texture path} (filename channel, socket as fallback).
+    mat_tex = {}
+    for entry in mat_list:
+        mname = entry.get("name", "")
+        if not mname:
+            continue
+        chans = mat_tex.setdefault(mname, {})
+        for sock, t in (entry.get("textures") or {}).items():
+            path = t.get("path", "")
+            if not path:
+                continue
+            ch = _detect_channel(os.path.basename(path)) or _socket_to_channel(sock)
+            if ch and ch not in chans:
+                chans[ch] = path
+
+    # Material -> collection (first object that references it) for folder routing.
+    mat_coll = {}
+    for od in obj_data:
+        coll = od.get("collection", "")
+        for mname in od.get("materials", []):
+            if mname and mname not in mat_coll:
+                mat_coll[mname] = coll
+
+    mel = unreal.MaterialEditingLibrary
+    mi_by_mat = {}
+    for mname, chans in mat_tex.items():
+        if not chans:
+            continue
+        coll = mat_coll.get(mname, "")
+        safe = _sanitize_seg(mname)
+        tex_dest = _collection_folder(_tex_dir(), coll)
+        mat_dest = _collection_folder(_mat_dir(), coll)
+        # Import this material's textures (reusing any already present).
+        uchan = {}
+        for ch, local in chans.items():
+            tp = _import_tex(local, tex_dest, f"T_{safe}_{ch}")
+            if tp:
+                _config_tex(tp, ch)
+                uchan[ch] = tp
+        if not uchan:
+            continue
+        # Master per unique material (dedup), then instance (dedup built into _create_mi).
+        m_path = f"{mat_dest}/M_{safe}"
+        if not _asset_lib().does_asset_exist(m_path):
+            m_path = _create_parent_material(f"M_{safe}", mat_dest, uchan, mel) or m_path
+        mi_path = _create_mi(f"MI_{safe}", mat_dest, m_path, uchan)
+        if mi_path:
+            mi_by_mat[mname] = mi_path
+
+    if not mi_by_mat:
+        return {}
+
+    # Assign MI_ per slot (over the embed material — validation-safe; embed stays as fallback).
+    asub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    assigned = 0
+    for od in obj_data:
+        guid = od.get("guid", "")
+        label = f"{ACTOR_PREFIX}{od.get('name', '')}"
+        actor = (_find_actor_by_guid(asub, guid) if guid else None) \
+            or _find_actor_by_label(asub, label)
+        comp = actor.static_mesh_component if actor else None
+        if not comp:
+            continue
+        for i, mname in enumerate(od.get("materials", [])):
+            mi = mi_by_mat.get(mname)
+            mat = _asset_lib().load_asset(mi) if mi else None
+            if mat:
+                try:
+                    comp.set_material(i, mat)
+                    assigned += 1
+                except Exception:
+                    pass
+    _log(f"Materials: {len(mi_by_mat)} unique (master+MI), {assigned} slot(s) assigned")
+    return mi_by_mat
+
 # ============================================================
 # IMPORT TEXTURES + CREATE MATERIALS
 # ============================================================
@@ -913,11 +1017,7 @@ def _import_scene_cmd(fbx_path="", scene_name="Scene", objects=None,
         _log(f"FBX not found: {fbx_path}", "error")
         return {"success": False, "error": "FBX not found"}
 
-    # Import textures if available
-    tex_folder = os.path.join(exchange_folder, "textures") if exchange_folder else ""
-    created_mats = {}
-    if tex_folder and os.path.isdir(tex_folder):
-        created_mats = _process_textures(tex_folder, scene_name, tex_dest, mat_dest)
+    mat_count = 0
 
     # Import FBX FIRST, before cleaning old actors
     imported = _import_fbx(fbx_path, mesh_dest, combine_meshes)
@@ -967,7 +1067,7 @@ def _import_scene_cmd(fbx_path="", scene_name="Scene", objects=None,
     if not mesh_paths:
         _log("  No valid meshes — keeping existing actors", "warning")
         return {"success": False, "error": "Import produced no valid meshes",
-                "actors": 0, "meshes": 0, "materials": len(created_mats)}
+                "actors": 0, "meshes": 0, "materials": 0}
 
     # Safe to clean now — we have valid replacements
     if selected_only:
@@ -978,32 +1078,26 @@ def _import_scene_cmd(fbx_path="", scene_name="Scene", objects=None,
     # Place meshes
     actors = _place_meshes(mesh_paths, obj_data, scene_name)
 
-    # Materials come from the FBX import itself (embed_textures=True on the Blender side
-    # → UEFN auto-builds a PBR material per mesh, reused by name). We intentionally do NOT
-    # override that with a single material here (that was the "first material on all" bug).
-
-    # Save state
-    channels = set()
-    for state in _imported_scenes.values():
-        for cs in state.get("texture_sets", {}).values():
-            channels.update(cs.keys())
+    # Build/assign per-material MM_/MI_ (deduped) in Materials/<collection>, OVER the embed
+    # auto-material. Embed stays as a fallback during validation; disabled once approved.
+    mat_map = _apply_materials(obj_data, exchange_folder)
 
     _imported_scenes[scene_name] = {
         "actors": len(actors),
         "meshes": len(mesh_paths),
-        "materials": created_mats,
+        "materials": mat_map,
         "time": time.time(),
         "selected_only": selected_only,
     }
     _last_import = time.time()
     _total_imports += 1
 
-    _log(f"IMPORT COMPLETE: {len(actors)} actor(s), {len(created_mats)} material(s)")
+    _log(f"IMPORT COMPLETE: {len(actors)} actor(s), {len(mat_map)} material(s)")
     return {
         "success": True,
         "actors": len(actors),
         "meshes": len(mesh_paths),
-        "materials": len(created_mats),
+        "materials": len(mat_map),
     }
 
 
