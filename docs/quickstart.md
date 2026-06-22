@@ -25,18 +25,22 @@ Leave that window open. Closing it stops the bridge.
 
 ## Step 3 — Connect from Blender
 
-1. In Blender's 3D viewport, press `N` to open the sidebar.
-2. Click the **UEFN** tab.
-3. In the **Connection** panel:
-   - Enter a **Project Name** — for example `Demo01`
-   - Click **Connect**
-4. The panel switches to "Connected" and shows the bridge port (8791).
-5. Check the UEFN Dashboard — it should now display:
+1. **Save your `.blend` first** (`Ctrl+S`). The filename becomes the project
+   name automatically — for example `Demo01.blend` → project `Demo01`. There
+   is no project field to type.
+2. In Blender's 3D viewport, press `N` to open the sidebar.
+3. Click the **UEFN** tab.
+4. In the **Connection** panel:
+   - It shows `Project: Demo01` (read from your `.blend` filename).
+   - Click **Connect**.
+5. The panel switches to "Connected" and shows the bridge port (8791).
+6. Check the UEFN Dashboard — it should now display:
    - **Bridge Project:** `Demo01`
    - A log line: `Blender connected: v4.2.0, project: Demo01`
 
-> The project name decides where assets are stored on the UEFN side:
+> The `.blend` filename decides where assets are stored on the UEFN side:
 > `/Game/YourUEFNProject/BlenderBridge/Demo01/Meshes|Materials|Textures/`
+> Rename the project by saving the `.blend` under a new name.
 
 ---
 
@@ -44,8 +48,8 @@ Leave that window open. Closing it stops the bridge.
 
 1. In Blender, make sure you have at least one mesh object in the scene.
    (A default cube works fine.)
-2. In the UEFN sidebar, expand **Environment Tools**.
-3. Click **Send Scene**.
+2. In the UEFN sidebar, expand **Export & Send**.
+3. Click **Send Full Scene**.
 4. Watch the UEFN Dashboard log — you should see lines like:
    - `Importing FBX: Scene.fbx`
    - `Imported 1 mesh(es)`
@@ -108,8 +112,7 @@ between Blender and UEFN. The bridge handles:
 ## Common next steps
 
 - Read [troubleshooting.md](troubleshooting.md) if anything went sideways
-- Read the [README](../README.md) for the full feature list and current
-  limitations
+- Read the [README](../README.md) for the full feature list
 - Report bugs at [github.com/KiKoZl1/uefn-blender-bridge/issues](https://github.com/KiKoZl1/uefn-blender-bridge/issues)
 
 Have fun. Build cool stuff. Don't ship anything important without backups.

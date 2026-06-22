@@ -12,16 +12,20 @@ import bpy
 import hashlib
 import json
 import math
+import mathutils
 import os
 import queue as _queue_mod
 import struct
 import tempfile
 import threading
 import time
+import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 from bpy.app.handlers import persistent
+
+from . import coords  # pure Blender<->UEFN convention (single source, unit-tested)
 
 # ============================================================
 # CONFIG
@@ -32,7 +36,7 @@ UEFN_PORT = 8790
 BLENDER_SERVER_PORT = 8791
 BLENDER_MAX_PORT = 8795
 EXCHANGE_DIR = os.path.join(tempfile.gettempdir(), "UEFNBlenderBridge")
-ADDON_VERSION = "0.5.0-beta"
+ADDON_VERSION = "1.0.0"
 
 # ============================================================
 # STATE
@@ -44,10 +48,12 @@ class BridgeState:
     host = UEFN_HOST
     port = UEFN_PORT
     status = "Disconnected"
+    last_error = ""            # last error message, surfaced in the panel until next action
     last_obj_hashes = {}       # {name: {"geo","mat","tex","trans"}}
     last_object_names = set()  # set of obj names from last sync
     last_send_time = 0.0
     live_active = False
+    sending = False            # True while an async send is in flight (one at a time)
     send_count = 0
     project_path = ""
     project_name = ""          # bridge project name (folder in UEFN)
@@ -70,6 +76,7 @@ def _log(m):
 
 
 def _err(m):
+    _st.last_error = str(m)
     print(f"[UEFNBridge ERROR] {m}")
 
 # ============================================================
@@ -95,6 +102,31 @@ def _send(cmd, params=None, timeout=120.0):
     if not body.get("success", False):
         raise RuntimeError(f"UEFN: {body.get('error', '?')}")
     return body.get("result", {})
+
+
+def _send_async(cmd, params=None, label="Sent"):
+    """Run _send on a daemon thread so the Blender UI doesn't freeze while UEFN imports (the slow
+    part). ONLY the network call is threaded — no bpy is touched off the main thread. Status and
+    last_error are plain string assignments (GIL-atomic). One send in flight at a time (_st.sending;
+    the panel redraw is nudged by the _process_incoming timer on the main thread)."""
+    _st.sending = True
+    _st.status = "Sending to UEFN..."
+
+    def _worker():
+        try:
+            r = _send(cmd, params, timeout=600.0)
+            ac = r.get("actors", r.get("updated", r.get("added", 0)))
+            _st.status = f"{label}: {ac}"
+            _st.last_error = ""
+            _st.send_count += 1
+            _st.last_send_time = time.time()
+        except Exception as e:
+            _st.status = f"Send failed: {e}"
+            _err(f"Send error: {e}")
+        finally:
+            _st.sending = False
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def _alive():
@@ -217,20 +249,13 @@ def _apply_incoming_transforms(params):
             ue_rot = od.get("rotation", [0, 0, 0])  # [Pitch, Yaw, Roll]
             ue_scale = od.get("scale", [1, 1, 1])
 
-            # Reverse: UE → Blender
-            obj.location.x = ue_loc[0] / 100.0
-            obj.location.y = -ue_loc[1] / 100.0
-            obj.location.z = ue_loc[2] / 100.0
-
-            # Pitch=-deg(ry), Yaw=-deg(rz), Roll=+deg(rx)  →  reverse
-            pitch, yaw, roll = ue_rot[0], ue_rot[1], ue_rot[2]
-            obj.rotation_euler.x = math.radians(roll)
-            obj.rotation_euler.y = -math.radians(pitch)
-            obj.rotation_euler.z = -math.radians(yaw)
-
-            obj.scale.x = ue_scale[0]
-            obj.scale.y = ue_scale[1]
-            obj.scale.z = ue_scale[2]
+            # Reverse UE → Blender into a WORLD matrix (single-source convention).
+            # matrix_world handles parenting (parent-inverse) and any rotation_mode
+            # (euler / quaternion / axis-angle) correctly — unlike writing local fields.
+            loc = mathutils.Vector(coords.loc_ue_to_bl(*ue_loc))
+            eul = mathutils.Euler(coords.rot_ue_to_bl(*ue_rot), "XYZ")
+            scl = mathutils.Vector((ue_scale[0], ue_scale[1], ue_scale[2]))
+            obj.matrix_world = mathutils.Matrix.LocRotScale(loc, eul, scl)
             updated += 1
 
         # Update snapshot to prevent re-sync loop
@@ -252,6 +277,16 @@ def _process_incoming():
                 _apply_incoming_transforms(params)
     except Exception as e:
         _err(f"Incoming process error: {e}")
+    # Redraw panels while an async send is in flight so its status updates show live (this runs
+    # on the main thread — safe to touch bpy, unlike the send worker).
+    if _st.sending:
+        try:
+            for win in bpy.context.window_manager.windows:
+                for area in win.screen.areas:
+                    if area.type == "VIEW_3D":
+                        area.tag_redraw()
+        except Exception:
+            pass
     return 0.1  # re-run every 100ms
 
 
@@ -326,19 +361,24 @@ def _obj_texture_hash(obj):
 
 
 def _obj_transform_hash(obj):
-    """Hash a single object's transform (location, rotation, scale) + collection."""
+    """Hash a single object's WORLD transform (location, rotation, scale) + collection.
+    Reads matrix_world (the SAME source as _obj_data) so the diff detects exactly what gets
+    sent — including parent-driven changes. All three are actor-applied (data-driven), so any
+    transform change is a FAST update — no re-export."""
     h = hashlib.md5()
-    loc, rot, sc = obj.location, obj.rotation_euler, obj.scale
-    h.update(struct.pack("9f",
-             loc.x, loc.y, loc.z,
-             rot.x, rot.y, rot.z,
-             sc.x, sc.y, sc.z))
+    loc, rot_q, sc = obj.matrix_world.decompose()
+    rot = rot_q.to_euler("XYZ")
+    h.update(struct.pack("9f", loc.x, loc.y, loc.z, rot.x, rot.y, rot.z, sc.x, sc.y, sc.z))
     h.update(_get_collection_path(obj).encode())
     return h.hexdigest()
 
 
 def _snapshot_all():
     """Snapshot all mesh objects' hashes for diff comparison."""
+    # Flush the depsgraph so matrix_world reflects edits made in the N-panel/viewport.
+    # Without this, matrix_world stays STALE until Blender flushes on its own (a save forces
+    # it) — which is why a rotate wasn't picked up by Send Changes until the user saved first.
+    bpy.context.view_layer.update()
     snap = {}
     for obj in bpy.context.scene.objects:
         if obj.type != "MESH":
@@ -872,30 +912,6 @@ def _export_material_info(tex_paths):
     return mat_json
 
 
-def _apply_rotation_scale(objects):
-    """Apply rotation & scale to mesh objects (preserves user pivot)."""
-    prev_active = bpy.context.view_layer.objects.active
-    prev_selected = [o for o in bpy.context.scene.objects if o.select_get()]
-    prev_mode = bpy.context.mode
-    if prev_mode != "OBJECT":
-        bpy.ops.object.mode_set(mode="OBJECT")
-
-    bpy.ops.object.select_all(action="DESELECT")
-    for o in objects:
-        if o.type == "MESH":
-            o.select_set(True)
-    if objects:
-        bpy.context.view_layer.objects.active = objects[0]
-
-    bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
-
-    # Restore selection
-    bpy.ops.object.select_all(action="DESELECT")
-    for o in prev_selected:
-        o.select_set(True)
-    bpy.context.view_layer.objects.active = prev_active
-
-
 def _export_fbx(selected_only=False):
     """Export FBX. selected_only=True exports current selection only."""
     filepath = os.path.join(EXCHANGE_DIR, "scene.fbx")
@@ -907,21 +923,56 @@ def _export_fbx(selected_only=False):
     if not any(obj.select_get() for obj in bpy.context.scene.objects):
         return None
 
-    # Auto-apply rotation & scale before export
-    if bpy.context.scene.uefn_bridge.auto_apply_transforms:
-        targets = [o for o in bpy.context.scene.objects if o.select_get() and o.type == "MESH"]
-        _apply_rotation_scale(targets)
-
-    # Zero out locations before export so FBX vertices stay in local space.
-    # UEFN's FBX importer bakes node transforms into mesh vertices when
-    # combine_meshes=False, which breaks pivot alignment. By exporting at
-    # origin, the mesh stays centered on its pivot. set_actor_location
-    # handles world positioning on the UEFN side.
+    # DATA-DRIVEN export: neutralize the WORLD matrix (parent + local) so the FBX carries the
+    # PURE mesh data — no location, no rotation, no scale, no parent influence. The UEFN actor
+    # supplies the full world transform (location + rotation + world-scale). UEFN reads FBX
+    # numbers as METERS, so global_scale=1 makes m->cm automatic; the actor's world-scale then
+    # gives the correct size in ANY case (parented, unparented, scaled). Zeroing only the LOCAL
+    # transform was wrong: a parent's scale leaked into the geometry (100x gigantic once the
+    # parent was cleared and that scale folded into local).
     selected_meshes = [o for o in bpy.context.scene.objects
                        if o.select_get() and o.type == "MESH"]
-    saved_locations = {o.name: o.location.copy() for o in selected_meshes}
+    # Instancing (F-44): export only ONE object per unique mesh datablock (the representative);
+    # linked duplicates reference it via their "mesh" field and become extra actors in UEFN.
+    rep_names = set(_mesh_rep_map(selected_meshes).values())
     for o in selected_meshes:
-        o.location = (0.0, 0.0, 0.0)
+        if o.name not in rep_names:
+            o.select_set(False)
+    selected_meshes = [o for o in selected_meshes if o.name in rep_names]
+    # Keep a SELECTED object active — deselecting non-reps can orphan the active object, which
+    # makes the FBX exporter produce an empty file on some selections.
+    if selected_meshes:
+        bpy.context.view_layer.objects.active = selected_meshes[0]
+    # LOD (combined export): rename each <base>_LOD<N> member to LOD<xx>_<base> so UEFN/Interchange
+    # builds ONE StaticMesh <base> with LOD levels. selected_meshes is already instance-deduped,
+    # so a forest collapses to one LOD0 + one LOD1 rep here. Restored after export.
+    lod_member = {}   # original obj name -> (base, level)
+    _lb = _lod_bases(selected_meshes)
+    for o in selected_meshes:
+        p = _lod_parse(o.name)
+        if p and p[0] in _lb:
+            lod_member[o.name] = (p[0], p[1])
+
+    saved = {}
+    name_saved = []   # (obj, original_name) for LOD-renamed members
+    for o in selected_meshes:
+        saved[o.name] = (o.location.copy(), o.rotation_euler.copy(),
+                         o.rotation_quaternion.copy(), o.scale.copy(), o.rotation_mode)
+        o.matrix_world = mathutils.Matrix.Identity(4)
+        lm = lod_member.get(o.name)
+        if lm:
+            name_saved.append((o, o.name))
+            o.name = f"LOD{lm[1]:02d}_{lm[0]}"
+    bpy.context.view_layer.update()
+
+    def _restore():
+        for o, orig in name_saved:   # LOD names first, so saved[] keys (original names) match
+            o.name = orig
+        for o in selected_meshes:
+            if o.name in saved:
+                loc, eul, quat, scl, mode = saved[o.name]
+                o.location, o.rotation_euler, o.rotation_quaternion, o.scale = loc, eul, quat, scl
+                o.rotation_mode = mode
 
     try:
         for area in bpy.context.screen.areas:
@@ -930,24 +981,22 @@ def _export_fbx(selected_only=False):
                     bpy.ops.export_scene.fbx(
                         filepath=filepath,
                         use_selection=True,
-                        apply_scale_options="FBX_SCALE_ALL",
-                        bake_space_transform=True,
+                        global_scale=1.0,             # UEFN reads FBX as meters -> m->cm automatic
+                        apply_unit_scale=False,
+                        apply_scale_options="FBX_SCALE_NONE",
+                        axis_forward="X", axis_up="Z",  # bake Z-up INTO the FBX (stands upright)
+                        use_space_transform=True,
+                        bake_space_transform=False,
                         mesh_smooth_type="FACE",
                         use_mesh_modifiers=True,
                         add_leaf_bones=False,
                         path_mode="COPY",
-                        embed_textures=False,
+                        embed_textures=True,
                     )
-                # Restore locations
-                for o in selected_meshes:
-                    if o.name in saved_locations:
-                        o.location = saved_locations[o.name]
+                _restore()
                 return filepath
     finally:
-        # Always restore even if export fails
-        for o in selected_meshes:
-            if o.name in saved_locations:
-                o.location = saved_locations[o.name]
+        _restore()
 
     return None
 
@@ -965,7 +1014,12 @@ def _export_fbx_objects(obj_names):
 
     all_objs = {o.name: o for o in bpy.context.scene.objects if o.type == "MESH"}
 
-    for name in obj_names:
+    # Instancing (F-44): export one FBX per unique mesh datablock (the representative); the other
+    # sharers reference it via their "mesh" field in _obj_data and become extra actors in UEFN.
+    sel_objs = [all_objs[n] for n in obj_names if n in all_objs]
+    rep_names = sorted(set(_mesh_rep_map(sel_objs).values()))
+
+    for name in rep_names:
         obj = all_objs.get(name)
         if not obj:
             continue
@@ -979,32 +1033,38 @@ def _export_fbx_objects(obj_names):
         obj.select_set(True)
         bpy.context.view_layer.objects.active = obj
 
-        # Apply rotation & scale if enabled
-        if bpy.context.scene.uefn_bridge.auto_apply_transforms:
-            _apply_rotation_scale([obj])
-
-        # Zero location for local-space vertices
-        saved_loc = obj.location.copy()
-        obj.location = (0.0, 0.0, 0.0)
+        # DATA-DRIVEN: neutralize the WORLD matrix (parent + local) so the FBX carries the PURE
+        # mesh data; the actor carries the full world location/rotation/world-scale. UEFN reads
+        # FBX as METERS, so global_scale=1 makes m->cm automatic and the actor's world-scale
+        # sizes it correctly in any case (parented, unparented, scaled). See _export_fbx.
+        saved = (obj.location.copy(), obj.rotation_euler.copy(),
+                 obj.rotation_quaternion.copy(), obj.scale.copy(), obj.rotation_mode)
+        obj.matrix_world = mathutils.Matrix.Identity(4)
+        bpy.context.view_layer.update()
 
         try:
             with bpy.context.temp_override(area=area_3d):
                 bpy.ops.export_scene.fbx(
                     filepath=filepath,
                     use_selection=True,
-                    apply_scale_options="FBX_SCALE_ALL",
-                    bake_space_transform=True,
+                    global_scale=1.0,             # UEFN reads FBX as meters -> m->cm automatic
+                    apply_unit_scale=False,
+                    apply_scale_options="FBX_SCALE_NONE",
+                    axis_forward="X", axis_up="Z",  # bake Z-up INTO the FBX (stands upright)
+                    use_space_transform=True,
+                    bake_space_transform=False,
                     mesh_smooth_type="FACE",
                     use_mesh_modifiers=True,
                     add_leaf_bones=False,
                     path_mode="COPY",
-                    embed_textures=False,
+                    embed_textures=True,
                 )
             results[name] = filepath
         except Exception as e:
             _err(f"FBX export failed for {name}: {e}")
         finally:
-            obj.location = saved_loc
+            obj.location, obj.rotation_euler, obj.rotation_quaternion, obj.scale, obj.rotation_mode = saved
+            bpy.context.view_layer.update()
 
     return results
 
@@ -1089,6 +1149,68 @@ def _get_collection_path(obj):
     return max(paths, key=lambda p: p.count("/"))
 
 
+def _dedup_guids():
+    """Ensure every mesh object has a UNIQUE bb_guid. Blender COPIES custom properties on
+    duplicate (Shift+D / Alt+D), so duplicates inherit the source's bb_guid and would all
+    collapse onto the SAME UEFN actor (the bridge matches actors by GUID). The first holder
+    (by name) keeps the guid; every later collider gets a fresh one (persisted = stable)."""
+    seen = set()
+    for o in sorted((ob for ob in bpy.context.scene.objects if ob.type == "MESH"),
+                    key=lambda x: x.name):
+        g = o.get("bb_guid")
+        if g and g in seen:
+            g = uuid.uuid4().hex
+            o["bb_guid"] = g
+        if g:
+            seen.add(g)
+
+
+def _lod_parse(name):
+    """(base, level, inst) for a LOD-named object, else None. Handles Blender's '.NNN' duplicate
+    suffix so a LOD'd mesh AND its instances group correctly:
+      'Tree_1_1_LOD0'      -> ('Tree_1_1', 0, '')        # original, level 0
+      'Tree_1_1_LOD0.001'  -> ('Tree_1_1', 0, '.001')    # instance .001, level 0
+      'Tree_1_1_LOD1.001'  -> ('Tree_1_1', 1, '.001')    # instance .001, level 1
+    So a forest of LOD'd trees = one base, N instances, each with its LOD levels."""
+    inst = ""
+    core = name
+    head, _, tail = name.rpartition(".")
+    if head and tail.isdigit():
+        core, inst = head, "." + tail
+    low = core.lower()
+    idx = low.rfind("_lod")
+    if idx < 0:
+        return None
+    suf = core[idx + 4:]
+    return (core[:idx], int(suf), inst) if suf.isdigit() else None
+
+
+def _lod_bases(objects):
+    """Set of base names that form a real LOD group (2+ distinct levels across all instances)."""
+    levels = {}
+    for o in objects:
+        if o.type != "MESH":
+            continue
+        p = _lod_parse(o.name)
+        if p:
+            levels.setdefault(p[0], set()).add(p[1])
+    return {b for b, lv in levels.items() if len(lv) >= 2}
+
+
+def _mesh_rep_map(objects):
+    """Map each mesh datablock name -> its REPRESENTATIVE object name (min name) among `objects`.
+    Objects sharing a datablock (linked duplicates) resolve to one representative, so they export
+    ONE mesh and spawn N actors in UEFN (instancing — F-44)."""
+    rep = {}
+    for o in objects:
+        if o.type != "MESH" or not o.data:
+            continue
+        key = o.data.name
+        if key not in rep or o.name < rep[key]:
+            rep[key] = o.name
+    return rep
+
+
 def _obj_data(objects):
     """Build object data list with Blender→UE coordinate conversion.
 
@@ -1100,31 +1222,67 @@ def _obj_data(objects):
 
     The FBX pipeline handles axis reorientation for mesh vertices.
     World coordinates only need the handedness flip (negate Y).
-    Based on xavier150/Blender-For-UnrealEngine-Addons (proven mapping).
-
-    Position:  UE.X = BL.X*100,  UE.Y = -BL.Y*100,  UE.Z = BL.Z*100
-    Rotation:  Pitch = -deg(ry),  Yaw = -deg(rz),    Roll = deg(rx)
-    Scale:     No swap needed (FBX handles axis reorientation)
+    The convention lives in coords.py (single source, unit-tested).
     """
+    # Flush the depsgraph so matrix_world is current (see _snapshot_all) — guarantees we send
+    # the just-edited transform, not a stale one, on the send_selected/send_scene paths too.
+    bpy.context.view_layer.update()
+    _dedup_guids()                  # duplicates (Alt+D/Shift+D) inherit bb_guid -> give fresh ones
+    reps = _mesh_rep_map(objects)   # instancing (F-44): shared datablock -> one representative
+
+    # LOD + instance: group LOD members by (base, instance). Each instance becomes ONE actor
+    # entry (name base[+.NNN], mesh=base, its LOD0 transform) and they ALL share SM_<base> —
+    # which the combined export builds (instance rep-dedup collapses the dups, LOD rename groups
+    # the levels). So a forest of LOD'd trees = N actors, ONE LOD'd StaticMesh.
+    lod_bases = _lod_bases(objects)
+    inst_levels = {}        # (base, inst) -> {level: obj}
+    for o in objects:
+        if o.type == "MESH":
+            p = _lod_parse(o.name)
+            if p and p[0] in lod_bases:
+                inst_levels.setdefault((p[0], p[2]), {})[p[1]] = o
+    lod_primary = {}        # primary (LOD0) obj name -> (base, inst)
+    lod_skip = set()        # every LOD-member obj name
+    for (base, inst), levels in inst_levels.items():
+        lod_skip.update(o.name for o in levels.values())
+        lod_primary[levels[min(levels)].name] = (base, inst)
+
     result = []
     for o in objects:
+        if o.name in lod_skip and o.name not in lod_primary:
+            continue  # non-primary LOD level — folded into its instance's LOD chain
         mw = o.matrix_world.copy()
         loc, rot_q, sc = mw.decompose()
         rot = rot_q.to_euler('XYZ')
 
+        # Stable identity that survives rename/duplicate (B3): a GUID stored as a custom
+        # property on the object, mirrored to a tag on the UEFN actor.
+        guid = o.get("bb_guid")
+        if not guid:
+            guid = uuid.uuid4().hex
+            o["bb_guid"] = guid
+
+        if o.name in lod_primary:           # LOD instance → name base[+.NNN], mesh = base
+            base, inst = lod_primary[o.name]
+            ename = base + inst
+            emesh = base
+        else:
+            ename = o.name
+            emesh = reps.get(o.data.name, o.name) if o.data else o.name
+
         result.append({
-            "name": o.name,
+            "name": ename,
+            "guid": guid,
+            # Representative mesh name for this object's datablock — instances share it (F-44).
+            "mesh": emesh,
+            # Ordered material slots -> Blender material name (UEFN assigns MI_ per slot; shared
+            # material name => one shared MI_, deduped). "" for an empty slot.
+            "materials": [(s.material.name if s.material else "") for s in o.material_slots],
             "collection": _get_collection_path(o),
-            "location": [
-                loc.x * 100.0,         # UE.X = BL.X (no swap)
-                -loc.y * 100.0,        # UE.Y = -BL.Y (handedness flip)
-                loc.z * 100.0,         # UE.Z = BL.Z
-            ],
-            "rotation": [
-                -math.degrees(rot.y),  # Pitch = -BL.ry
-                -math.degrees(rot.z),  # Yaw   = -BL.rz
-                math.degrees(rot.x),   # Roll  = +BL.rx
-            ],
+            "location": coords.loc_bl_to_ue(loc.x, loc.y, loc.z),
+            # DATA-DRIVEN: mesh is exported clean (no baked rotation), the actor carries the
+            # full world rotation. This conversion is the CALIBRATION TARGET (coords.py).
+            "rotation": coords.rot_bl_to_ue(rot.x, rot.y, rot.z),
             "scale": [sc.x, sc.y, sc.z],
         })
     return result
@@ -1134,15 +1292,26 @@ def _obj_data(objects):
 # ============================================================
 
 
+def _blend_project_name():
+    """Project folder name = the .blend filename (no extension). Auto-identifies the Blender
+    project — no typing — and keeps each .blend's assets in its own UEFN subfolder. '' if unsaved."""
+    path = bpy.data.filepath
+    return os.path.splitext(os.path.basename(path))[0] if path else ""
+
+
 def do_connect():
     """Connect to UEFN bridge."""
-    props = bpy.context.scene.uefn_bridge
-    pname = props.project_name.strip()
+    # The project IS the .blend file — its filename names the UEFN folder, fully automatic
+    # (no field to type). A STABLE name is required from the first sync, so block if unsaved
+    # (connecting then saving later would move the folder and orphan what's already synced).
+    pname = _blend_project_name()
     if not pname:
-        _st.status = "Enter a project name first"
-        _err("Project name is required before connecting")
+        _st.status = "Save the .blend first"
+        _err("Save the .blend (Ctrl+S) before connecting — the filename names the UEFN "
+             "project folder, so your assets stay in one stable place.")
         return False
 
+    _st.last_error = ""
     _st.status = "Connecting..."
     _log(f"Connecting to UEFN at {_url()}...")
 
@@ -1176,6 +1345,14 @@ def do_connect():
             bpy.app.timers.register(_process_incoming, first_interval=0.5,
                                     persistent=True)
 
+        # If Live Sync was already on (e.g. reconnecting after re-running the UEFN script),
+        # re-assert it so UEFN gets our port + live flag back.
+        if _st.live_active:
+            try:
+                _send("set_live_sync", {"active": True, "blender_port": _st.server_port})
+            except Exception:
+                pass
+
         return True
     except Exception as e:
         _st.status = f"Failed: {e}"
@@ -1205,7 +1382,11 @@ def do_send_scene(is_live=False):
     """Export full scene and send to UEFN."""
     if not _st.connected:
         return False
+    if _st.sending:
+        _st.status = "Busy — a send is already in progress"
+        return False
 
+    _st.last_error = ""
     _st.status = "Live sync..." if is_live else "Exporting..."
 
     # Capture world transforms BEFORE export (export may modify them)
@@ -1231,25 +1412,20 @@ def do_send_scene(is_live=False):
         "combine_meshes": combine,
     }
 
-    try:
-        r = _send("import_scene", params)
-        _st.last_obj_hashes = _snapshot_all()
-        _st.last_object_names = set(_st.last_obj_hashes.keys())
-        _st.last_send_time = time.time()
-        _st.send_count += 1
-        ac = r.get("actors", 0)
-        _st.status = f"Live: {ac} actors" if is_live else f"Sent: {ac} actors"
-        _log(f"Scene sent: {ac} actors, {r.get('materials', 0)} materials")
-        return True
-    except Exception as e:
-        _st.status = f"Send failed: {e}"
-        _err(f"Send scene error: {e}")
-        return False
+    # Snapshot the baseline NOW (main thread) — we're sending the current state. The HTTP send
+    # runs async so the UI doesn't freeze while UEFN imports.
+    _st.last_obj_hashes = _snapshot_all()
+    _st.last_object_names = set(_st.last_obj_hashes.keys())
+    _send_async("import_scene", params, "Live" if is_live else "Sent")
+    return True
 
 
 def do_send_selected():
     """Export selected objects and send to UEFN."""
     if not _st.connected:
+        return False
+    if _st.sending:
+        _st.status = "Busy — a send is already in progress"
         return False
 
     selected = _collect_selected_meshes()
@@ -1257,13 +1433,17 @@ def do_send_selected():
         _st.status = "No mesh selected"
         return False
 
+    _st.last_error = ""
     _st.status = "Exporting selected..."
 
     # Capture world transforms BEFORE export (export may modify them)
     obj_payload = _obj_data(selected)
 
+    # Scope textures + material metadata to the SELECTION (B4) — not the whole scene.
+    obj_names = [o.name for o in selected]
     _clean_exchange()
-    _export_textures()
+    tex_paths = _export_textures_for_objects(obj_names)
+    _export_material_info_for_objects(obj_names, tex_paths)
 
     orig_mode = bpy.context.mode
     if orig_mode != "OBJECT":
@@ -1291,22 +1471,17 @@ def do_send_selected():
         "combine_meshes": combine,
     }
 
-    try:
-        r = _send("import_scene", params)
-        _st.send_count += 1
-        ac = r.get("actors", 0)
-        _st.status = f"Sent {ac} selected"
-        _log(f"Selected sent: {ac} actors")
-        return True
-    except Exception as e:
-        _st.status = f"Send failed: {e}"
-        _err(f"Send selected error: {e}")
-        return False
+    # Async HTTP send — UI stays responsive while UEFN imports.
+    _send_async("import_scene", params, "Sent selected")
+    return True
 
 
 def do_send_changes():
     """Smart diff sync — detects what changed and syncs only that."""
     if not _st.connected:
+        return False
+    if _st.sending:
+        _st.status = "Busy — a send is already in progress"
         return False
 
     new_snap = _snapshot_all()
@@ -1509,7 +1684,7 @@ def do_clean_all():
     if not _st.connected:
         return False
     try:
-        r = _send("clean_all")
+        r = _send("clean_all", {"confirm": True})
         c = r.get("cleaned", 0)
         _st.status = f"Cleaned {c} actors"
         _log(f"Clean all: {c} actors")
@@ -1552,8 +1727,14 @@ def do_start_live():
     _st.last_object_names = set(_st.last_obj_hashes.keys())
     if _on_save not in bpy.app.handlers.save_post:
         bpy.app.handlers.save_post.append(_on_save)
-    _st.status = "Live: syncs on Ctrl+S"
-    _log("Live sync started (triggers on save)")
+    # Tell UEFN to start pushing actor edits back to us (bidirectional live sync). Send our
+    # server port too, so this re-establishes it even if the UEFN script was re-run.
+    try:
+        _send("set_live_sync", {"active": True, "blender_port": _st.server_port})
+    except Exception as e:
+        _err(f"Could not enable UEFN->Blender live sync: {e}")
+    _st.status = "Live: Blender⇄UEFN"
+    _log("Live sync started (Blender→UEFN on save; UEFN→Blender live)")
 
 
 def do_stop_live():
@@ -1561,6 +1742,10 @@ def do_stop_live():
     _st.live_active = False
     if _on_save in bpy.app.handlers.save_post:
         bpy.app.handlers.save_post.remove(_on_save)
+    try:
+        _send("set_live_sync", {"active": False})
+    except Exception:
+        pass
     _st.status = "Connected"
     _log("Live sync stopped")
 
@@ -1703,12 +1888,17 @@ class UEFNBRIDGE_OT_stop_live(bpy.types.Operator):
 
 class UEFNBRIDGE_OT_clean(bpy.types.Operator):
     bl_idname = "uefn_bridge.clean"
-    bl_label = "Clean All in UEFN"
-    bl_description = "Remove all bridge-imported actors and assets from UEFN"
+    bl_label = "Clean THIS Project in UEFN"
+    bl_description = ("Remove THIS project's bridge actors + its BlenderBridge/<project> assets "
+                     "from UEFN. Scoped to this .blend — never touches other projects")
 
     @classmethod
     def poll(cls, context):
         return _st.connected
+
+    def invoke(self, context, event):
+        # Destructive (hard-deletes THIS project's BB_ actors + assets) — confirm first.
+        return context.window_manager.invoke_confirm(self, event)
 
     def execute(self, context):
         do_clean_all()
@@ -1752,11 +1942,7 @@ class UEFNBRIDGE_OT_open_url(bpy.types.Operator):
 
 
 class UEFNBridgeProperties(bpy.types.PropertyGroup):
-    project_name: bpy.props.StringProperty(
-        name="Project",
-        default="",
-        description="Bridge project name — creates a folder in UEFN (e.g. MyMap, Level01)",
-    )
+    # No project_name field — the project is the .blend filename, fully automatic.
     host: bpy.props.StringProperty(
         name="Host",
         default="127.0.0.1",
@@ -1768,22 +1954,6 @@ class UEFNBridgeProperties(bpy.types.PropertyGroup):
         min=1024,
         max=65535,
         description="UEFN bridge server port",
-    )
-    tool_category: bpy.props.EnumProperty(
-        name="Tools",
-        items=[
-            ("ENVIRONMENT", "Environment Tools",
-             "Mesh sync, materials, transforms, live sync"),
-        ],
-        default="ENVIRONMENT",
-        description="Active tool category",
-    )
-    sync_interval: bpy.props.FloatProperty(
-        name="Interval (s)",
-        default=2.0,
-        min=0.5,
-        max=30.0,
-        description="Live sync check interval in seconds",
     )
     bake_resolution: bpy.props.IntProperty(
         name="Resolution",
@@ -1799,8 +1969,9 @@ class UEFNBridgeProperties(bpy.types.PropertyGroup):
     )
     combine_meshes: bpy.props.BoolProperty(
         name="Combine Meshes",
-        default=True,
-        description="Combine all meshes into one on import (uncheck to keep separate)",
+        default=False,
+        description="Merge the selection into ONE static mesh on import. Off (default) "
+                    "keeps objects separate so each lands at its own Blender position.",
     )
     auto_apply_transforms: bpy.props.BoolProperty(
         name="Apply Rotation & Scale",
@@ -1841,6 +2012,15 @@ class UEFNBRIDGE_PT_main(bpy.types.Panel):
 
         box.label(text=_st.status, icon="INFO")
 
+        if _st.last_error:
+            ebox = box.box()
+            ebox.alert = True
+            ebox.label(text="Last error:", icon="ERROR")
+            for line in _st.last_error.split("\n"):
+                line = line.strip()
+                if line:
+                    ebox.label(text=line)
+
         if _st.project_name:
             box.label(text=f"Project: {_st.project_name}", icon="FILE_FOLDER")
         if _st.project_path:
@@ -1851,11 +2031,6 @@ class UEFNBRIDGE_PT_main(bpy.types.Panel):
 
         if _st.send_count > 0:
             box.label(text=f"Total syncs: {_st.send_count}", icon="RECOVER_LAST")
-
-        # Category selector (visible when connected)
-        if _st.connected:
-            layout.separator()
-            layout.prop(props, "tool_category", text="")
 
 
 class UEFNBRIDGE_PT_connection(bpy.types.Panel):
@@ -1871,7 +2046,11 @@ class UEFNBRIDGE_PT_connection(bpy.types.Panel):
         props = context.scene.uefn_bridge
 
         if not _st.connected:
-            layout.prop(props, "project_name", icon="FILE_FOLDER")
+            auto = _blend_project_name()
+            if auto:
+                layout.label(text=f"Project: {auto}", icon="FILE_BLEND")
+            else:
+                layout.label(text="Save the .blend to name the project", icon="ERROR")
             layout.separator()
             layout.prop(props, "host")
             layout.prop(props, "port")
@@ -1890,8 +2069,7 @@ class UEFNBRIDGE_PT_export(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return (_st.connected
-                and context.scene.uefn_bridge.tool_category == "ENVIRONMENT")
+        return _st.connected
 
     def draw(self, context):
         layout = self.layout
@@ -1917,8 +2095,7 @@ class UEFNBRIDGE_PT_bake(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return (_st.connected
-                and context.scene.uefn_bridge.tool_category == "ENVIRONMENT")
+        return _st.connected
 
     def draw(self, context):
         layout = self.layout
@@ -1945,8 +2122,7 @@ class UEFNBRIDGE_PT_live(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return (_st.connected
-                and context.scene.uefn_bridge.tool_category == "ENVIRONMENT")
+        return _st.connected
 
     def draw(self, context):
         layout = self.layout
@@ -1978,8 +2154,8 @@ class UEFNBRIDGE_PT_info(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="UEFN Blender Bridge v1.0")
-        layout.label(text="by KiKoZl  |  Surprise Co.")
+        layout.label(text=f"UEFN Blender Bridge v{ADDON_VERSION}")
+        layout.label(text="by KiKoZl - Surprise Co.")
 
         op = layout.operator("uefn_bridge.open_url", text="GitHub", icon="URL")
         op.url = "https://github.com/KiKoZl1"

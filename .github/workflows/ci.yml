@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: py_compile both sides
+        run: |
+          python -m py_compile \
+            BlenderAddon/uefn_bridge/__init__.py \
+            BlenderAddon/uefn_bridge/bridge.py \
+            BlenderAddon/uefn_bridge/coords.py \
+            UEFNPlugin/uefn_blender_bridge.py
+      - name: unit tests (pure functions, no Blender)
+        run: python tests/test_coords.py

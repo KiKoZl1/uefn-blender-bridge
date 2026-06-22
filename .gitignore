@@ -6,8 +6,10 @@ __pycache__/
 .Python
 *.egg-info/
 .pytest_cache/
+.venv/
+venv/
 
-# Bridge artifacts
+# Bridge runtime (temp texture/mesh/FBX handoff)
 *.fbx
 materials.json
 UEFNBlenderBridge/
@@ -15,14 +17,17 @@ UEFNBlenderBridge/
 # Editor / OS
 .vscode/
 .idea/
+*.code-workspace
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# Build / release
-release/*.zip
+# Build / release (published via GitHub Releases, not tracked in-tree)
+release/
 dist/
 build/
 
 # Logs
 *.log
+
+# NOTE: fonts/ IS committed on purpose (bundled OFL brand fonts).

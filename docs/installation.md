@@ -11,9 +11,9 @@ same machine.
 | | Minimum | Tested |
 |---|---|---|
 | **Blender** | 3.6 LTS | 3.6, 4.0, 4.2 |
-| **UEFN** | 30.x | 30.x |
+| **UEFN** | 40.00+ (Python era) | 41.10 (latest) |
 | **OS** | Windows 10 | Windows 11 |
-| **Python** | (bundled) | Blender 3.10+, Unreal 3.11 |
+| **Python** | (bundled) | Blender 3.10+, UEFN 3.11 |
 
 > macOS and Linux are not officially tested. The code is platform-agnostic
 > Python, so it *should* work, but you're on your own for now.
@@ -64,7 +64,7 @@ toggle the sidebar).
 
 ## 2. Install the UEFN script
 
-UEFN doesn't have a "plugin" system in the Unreal sense — Python scripts are
+UEFN doesn't have a traditional editor "plugin" system — Python scripts are
 run on demand. There are two ways to run the bridge script.
 
 ### Option A — Run from the Tools menu (simple)
@@ -111,11 +111,13 @@ If running the script does nothing:
 1. **In UEFN:** the Dashboard should show:
    - Status: `Listening on port 8790`
    - Bridge Project: *(empty until Blender connects)*
-2. **In Blender:** open the UEFN sidebar (`N` key), pick a project name
-   (e.g. `MyTestProject`), click **Connect**.
-3. The Blender panel should show `Connected — Listening on 8791`
-4. The UEFN Dashboard should now show your project name and a log line
-   like `Blender connected: v4.2.0, project: MyTestProject`.
+2. **In Blender:** save your `.blend` first (`Ctrl+S`) — the filename becomes
+   the project name automatically. There is no project field to type.
+3. Open the UEFN sidebar (`N` key), go to the **Connection** panel. It shows
+   `Project: <your .blend filename>`. Click **Connect**.
+4. The Blender panel switches to **Connected** and shows the bridge port (8791).
+5. The UEFN Dashboard should now show your project name and a log line
+   like `Blender connected: v4.2.0, project: <your .blend filename>`.
 
 You're done. Head to [Quickstart](quickstart.md) for your first sync.
 
