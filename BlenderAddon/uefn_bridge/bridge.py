@@ -1184,6 +1184,9 @@ def _obj_data(objects):
             "guid": guid,
             # Representative mesh name for this object's datablock — instances share it (F-44).
             "mesh": reps.get(o.data.name, o.name) if o.data else o.name,
+            # Ordered material slots -> Blender material name (UEFN assigns MI_ per slot; shared
+            # material name => one shared MI_, deduped). "" for an empty slot.
+            "materials": [(s.material.name if s.material else "") for s in o.material_slots],
             "collection": _get_collection_path(o),
             "location": coords.loc_bl_to_ue(loc.x, loc.y, loc.z),
             # DATA-DRIVEN: mesh is exported clean (no baked rotation), the actor carries the
