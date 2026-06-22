@@ -943,14 +943,28 @@ def _export_fbx(selected_only=False):
     # makes the FBX exporter produce an empty file on some selections.
     if selected_meshes:
         bpy.context.view_layer.objects.active = selected_meshes[0]
+    # LOD (combined export): rename each <base>_LOD<N> member to LOD<xx>_<base> so UEFN/Interchange
+    # builds ONE StaticMesh <base> with LOD levels. Restored after export.
+    lod_member = {}   # original obj name -> (base, level)
+    for base, levels in _lod_groups(selected_meshes).items():
+        for lvl, o in levels.items():
+            lod_member[o.name] = (base, lvl)
+
     saved = {}
+    name_saved = []   # (obj, original_name) for LOD-renamed members
     for o in selected_meshes:
         saved[o.name] = (o.location.copy(), o.rotation_euler.copy(),
                          o.rotation_quaternion.copy(), o.scale.copy(), o.rotation_mode)
         o.matrix_world = mathutils.Matrix.Identity(4)
+        lm = lod_member.get(o.name)
+        if lm:
+            name_saved.append((o, o.name))
+            o.name = f"LOD{lm[1]:02d}_{lm[0]}"
     bpy.context.view_layer.update()
 
     def _restore():
+        for o, orig in name_saved:   # LOD names first, so saved[] keys (original names) match
+            o.name = orig
         for o in selected_meshes:
             if o.name in saved:
                 loc, eul, quat, scl, mode = saved[o.name]
@@ -1148,6 +1162,31 @@ def _dedup_guids():
             seen.add(g)
 
 
+def _lod_key(name):
+    """('<base>', N) if `name` ends in _LOD<N> (case-insensitive), else None. e.g.
+    'Tree_1_1_LOD0' -> ('Tree_1_1', 0)."""
+    low = name.lower()
+    idx = low.rfind("_lod")
+    if idx < 0:
+        return None
+    suffix = name[idx + 4:]
+    return (name[:idx], int(suffix)) if suffix.isdigit() else None
+
+
+def _lod_groups(objects):
+    """{base: {level: obj}} for mesh objects named <base>_LOD<N> — but only true groups (2+
+    levels). UEFN/Interchange builds ONE StaticMesh with LODs when the FBX nodes are named
+    LOD<xx>_<base> (see _export_fbx). A lone _LOD0 is left as a normal mesh."""
+    groups = {}
+    for o in objects:
+        if o.type != "MESH":
+            continue
+        k = _lod_key(o.name)
+        if k:
+            groups.setdefault(k[0], {})[k[1]] = o
+    return {b: lv for b, lv in groups.items() if len(lv) >= 2}
+
+
 def _mesh_rep_map(objects):
     """Map each mesh datablock name -> its REPRESENTATIVE object name (min name) among `objects`.
     Objects sharing a datablock (linked duplicates) resolve to one representative, so they export
@@ -1180,8 +1219,20 @@ def _obj_data(objects):
     bpy.context.view_layer.update()
     _dedup_guids()                  # duplicates (Alt+D/Shift+D) inherit bb_guid -> give fresh ones
     reps = _mesh_rep_map(objects)   # instancing (F-44): shared datablock -> one representative
+
+    # LOD collapse: a <base>_LOD<N> group becomes ONE entry (named <base>, LOD0's transform) and
+    # ONE actor — UEFN builds the LOD'd StaticMesh <base> from the LOD<xx>_<base> FBX nodes.
+    lod = _lod_groups(objects)
+    lod_primary = {}        # primary obj name -> base name
+    lod_members = set()     # all LOD-member obj names
+    for base, levels in lod.items():
+        lod_primary[levels[min(levels)].name] = base
+        lod_members.update(o.name for o in levels.values())
+
     result = []
     for o in objects:
+        if o.name in lod_members and o.name not in lod_primary:
+            continue  # non-primary LOD level — folded into the primary's LOD chain
         mw = o.matrix_world.copy()
         loc, rot_q, sc = mw.decompose()
         rot = rot_q.to_euler('XYZ')
@@ -1193,11 +1244,18 @@ def _obj_data(objects):
             guid = uuid.uuid4().hex
             o["bb_guid"] = guid
 
+        if o.name in lod_primary:           # LOD group → name/mesh = base
+            ename = lod_primary[o.name]
+            emesh = ename
+        else:
+            ename = o.name
+            emesh = reps.get(o.data.name, o.name) if o.data else o.name
+
         result.append({
-            "name": o.name,
+            "name": ename,
             "guid": guid,
             # Representative mesh name for this object's datablock — instances share it (F-44).
-            "mesh": reps.get(o.data.name, o.name) if o.data else o.name,
+            "mesh": emesh,
             # Ordered material slots -> Blender material name (UEFN assigns MI_ per slot; shared
             # material name => one shared MI_, deduped). "" for an empty slot.
             "materials": [(s.material.name if s.material else "") for s in o.material_slots],
