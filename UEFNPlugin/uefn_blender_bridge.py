@@ -754,6 +754,77 @@ def _socket_to_channel(socket):
     }.get((socket or "").lower())
 
 
+COLOR_MASTER = "MM_BlenderBridge"
+
+
+def _ensure_color_master():
+    """ONE shared master for color-only materials: VectorParameter BaseColor + Scalars
+    Metallic/Roughness/Specular. No textures => no default-texture problem, so a single shared
+    master works. Created once in Materials root, reused by all color MI_."""
+    mat_root = _base_dir("Materials")
+    mp = f"{mat_root}/{COLOR_MASTER}"
+    if _asset_lib().does_asset_exist(mp):
+        return mp
+    tools = unreal.AssetToolsHelpers.get_asset_tools()
+    mat = tools.create_asset(COLOR_MASTER, mat_root, unreal.Material, unreal.MaterialFactoryNew())
+    if not mat:
+        return None
+    mel = unreal.MaterialEditingLibrary
+    try:
+        bc = mel.create_material_expression(mat, unreal.MaterialExpressionVectorParameter, -400, 0)
+        bc.set_editor_property("parameter_name", "BaseColor")
+        bc.set_editor_property("default_value", unreal.LinearColor(0.5, 0.5, 0.5, 1.0))
+        mel.connect_material_property(bc, "", unreal.MaterialProperty.MP_BASE_COLOR)
+        for i, (pn, prop, dv) in enumerate((
+            ("Metallic", unreal.MaterialProperty.MP_METALLIC, 0.0),
+            ("Roughness", unreal.MaterialProperty.MP_ROUGHNESS, 0.5),
+            ("Specular", unreal.MaterialProperty.MP_SPECULAR, 0.5),
+        )):
+            s = mel.create_material_expression(
+                mat, unreal.MaterialExpressionScalarParameter, -400, 200 + i * 150)
+            s.set_editor_property("parameter_name", pn)
+            s.set_editor_property("default_value", dv)
+            mel.connect_material_property(s, "", prop)
+        mel.recompile_material(mat)
+    except Exception as e:
+        _log(f"  color master build error: {e}", "warning")
+    _asset_lib().save_asset(mp)
+    _log(f"  Master: {COLOR_MASTER}")
+    return mp
+
+
+def _color_mi(mname, safe, mat_dest, props):
+    """Color-only MI_ (instance of the shared MM_BlenderBridge) — overrides BaseColor + scalars
+    from the Blender material values. Deduped by path."""
+    master = _ensure_color_master()
+    if not master:
+        return None
+    mi_path = f"{mat_dest}/MI_{safe}"
+    if _asset_lib().does_asset_exist(mi_path):
+        mi = _asset_lib().load_asset(mi_path)
+    else:
+        tools = unreal.AssetToolsHelpers.get_asset_tools()
+        mi = tools.create_asset(f"MI_{safe}", mat_dest, unreal.MaterialInstanceConstant,
+                                unreal.MaterialInstanceConstantFactoryNew())
+        if mi:
+            mi.set_editor_property("parent", _asset_lib().load_asset(master))
+    if not mi:
+        return None
+    mel = unreal.MaterialEditingLibrary
+    bc = props.get("base_color") or [0.5, 0.5, 0.5, 1.0]
+    try:
+        mel.set_material_instance_vector_parameter_value(
+            mi, "BaseColor",
+            unreal.LinearColor(bc[0], bc[1], bc[2], bc[3] if len(bc) > 3 else 1.0))
+        mel.set_material_instance_scalar_parameter_value(mi, "Metallic", float(props.get("metallic", 0.0)))
+        mel.set_material_instance_scalar_parameter_value(mi, "Roughness", float(props.get("roughness", 0.5)))
+        mel.set_material_instance_scalar_parameter_value(mi, "Specular", float(props.get("specular", 0.5)))
+    except Exception as e:
+        _log(f"  color MI param set failed: {e}", "warning")
+    _asset_lib().save_asset(mi_path)
+    return mi_path
+
+
 def _apply_materials(obj_data, exchange_folder):
     """Build ONE master + instance per UNIQUE Blender material (deduped by name) and assign them
     per slot to the actors. Material-driven: uses materials.json (material -> textures) + each
@@ -763,16 +834,20 @@ def _apply_materials(obj_data, exchange_folder):
         return {}
     mat_json = os.path.join(exchange_folder, "materials.json")
     if not os.path.exists(mat_json):
+        _log(f"  MAT: materials.json NOT FOUND at {mat_json}", "warning")
         return {}
     try:
         with open(mat_json, "r") as f:
             mat_list = json.load(f)
     except Exception as e:
-        _log(f"  materials.json read failed: {e}", "warning")
+        _log(f"  MAT: materials.json read failed: {e}", "warning")
         return {}
+    _log(f"  MAT: materials.json has {len(mat_list)} entr(ies)")
 
-    # Unique material -> {channel: local texture path} (filename channel, socket as fallback).
+    # Unique material -> {channel: local texture path} (filename channel, socket as fallback) +
+    # color props (for texture-less materials, which build a color MI off the shared master).
     mat_tex = {}
+    mat_props = {}
     for entry in mat_list:
         mname = entry.get("name", "")
         if not mname:
@@ -785,6 +860,13 @@ def _apply_materials(obj_data, exchange_folder):
             ch = _detect_channel(os.path.basename(path)) or _socket_to_channel(sock)
             if ch and ch not in chans:
                 chans[ch] = path
+        if mname not in mat_props:
+            mat_props[mname] = {
+                "base_color": entry.get("base_color") or entry.get("diffuse_color"),
+                "metallic": entry.get("metallic", 0.0),
+                "roughness": entry.get("roughness", 0.5),
+                "specular": entry.get("specular", entry.get("specular_ior_level", 0.5)),
+            }
 
     # Material -> collection (first object that references it) for folder routing.
     mat_coll = {}
@@ -797,26 +879,36 @@ def _apply_materials(obj_data, exchange_folder):
     mel = unreal.MaterialEditingLibrary
     mi_by_mat = {}
     for mname, chans in mat_tex.items():
-        if not chans:
-            continue
         coll = mat_coll.get(mname, "")
         safe = _sanitize_seg(mname)
-        tex_dest = _collection_folder(_tex_dir(), coll)
         mat_dest = _collection_folder(_mat_dir(), coll)
-        # Import this material's textures (reusing any already present).
-        uchan = {}
-        for ch, local in chans.items():
-            tp = _import_tex(local, tex_dest, f"T_{safe}_{ch}")
-            if tp:
-                _config_tex(tp, ch)
-                uchan[ch] = tp
-        if not uchan:
-            continue
-        # Master per unique material (dedup), then instance (dedup built into _create_mi).
-        m_path = f"{mat_dest}/M_{safe}"
-        if not _asset_lib().does_asset_exist(m_path):
-            m_path = _create_parent_material(f"M_{safe}", mat_dest, uchan, mel) or m_path
-        mi_path = _create_mi(f"MI_{safe}", mat_dest, m_path, uchan)
+        mi_path = None
+
+        if chans:
+            # Textured: import textures, build per-material master M_ + instance MI_.
+            tex_dest = _collection_folder(_tex_dir(), coll)
+            _log(f"  MAT '{mname}': textured {sorted(chans.keys())} -> {mat_dest}")
+            uchan = {}
+            for ch, local in chans.items():
+                tp = _import_tex(local, tex_dest, f"T_{safe}_{ch}")
+                if tp:
+                    _config_tex(tp, ch)
+                    uchan[ch] = tp
+                else:
+                    _log(f"    texture import failed: {ch} <- {local}", "warning")
+            if uchan:
+                m_path = f"{mat_dest}/M_{safe}"
+                if not _asset_lib().does_asset_exist(m_path):
+                    m_path = _create_parent_material(f"M_{safe}", mat_dest, uchan, mel) or m_path
+                mi_path = _create_mi(f"MI_{safe}", mat_dest, m_path, uchan)
+            else:
+                _log(f"  MAT '{mname}': texture imports failed — color fallback", "warning")
+                mi_path = _color_mi(mname, safe, mat_dest, mat_props.get(mname, {}))
+        else:
+            # Color-only: MI_ off the shared MM_BlenderBridge master.
+            _log(f"  MAT '{mname}': color-only -> {mat_dest}")
+            mi_path = _color_mi(mname, safe, mat_dest, mat_props.get(mname, {}))
+
         if mi_path:
             mi_by_mat[mname] = mi_path
 
