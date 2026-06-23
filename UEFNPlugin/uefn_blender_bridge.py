@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 # CONFIG
 # ============================================================
 
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.0.1"
 DEFAULT_PORT = 8790
 MAX_PORT = 8795
 TICK_BATCH = 5
