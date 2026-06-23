@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.1] — 2026-06-23
+
+Patch release. The first real, multi-object textured scene test surfaced four
+issues — all fixed and live-validated: a much faster import, no more timeout, a
+correct Clean, and meshes whose names contain spaces now import.
+
+### Fixed
+
+- **Clean now reliably removes the project's actors.** The previous scope relied
+  on an Outliner-folder lookup that isn't available in current UEFN builds, so
+  Clean deleted the assets but left the actors behind, mesh-less, in the
+  Outliner. Actors are now scoped by a per-project tag, with an orphan sweep
+  that clears any mesh-less bridge actor left by an earlier clean.
+- **No more "Gateway Timeout" on large imports.** The UEFN-side request deadline
+  was too short for a heavy textured scene; a long single-threaded import no
+  longer times out mid-flight.
+- **Meshes with spaces in their name** (e.g. `Human Architecture Building`) were
+  silently skipped — neither placed nor given materials. Object names are now
+  matched the same way UEFN sanitizes asset names.
+
+### Changed
+
+- **Much faster import** (roughly 4× on a textured scene). The FBX no longer
+  carries or imports embedded materials/textures — the `MM_`/`MI_` pipeline is
+  the single source of materials. One shared textured master is compiled per
+  channel-set (`MM_Tex_BC_R`, …) instead of one per material, and textures are
+  saved once instead of twice.
+
+---
+
 ## [1.0.0] — 2026-06-22
 
 First stable release. The leap from `0.5.0-beta`: two-way live sync is now
