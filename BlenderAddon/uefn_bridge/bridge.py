@@ -990,8 +990,11 @@ def _export_fbx(selected_only=False):
                         mesh_smooth_type="FACE",
                         use_mesh_modifiers=True,
                         add_leaf_bones=False,
-                        path_mode="COPY",
-                        embed_textures=True,
+                        # Mesh-only FBX: textures travel via the separate texture export +
+                        # materials.json, and UEFN no longer imports embedded materials — so
+                        # copying/embedding them here just bloats the file and slows the import.
+                        path_mode="STRIP",
+                        embed_textures=False,
                     )
                 _restore()
                 return filepath
@@ -1056,8 +1059,9 @@ def _export_fbx_objects(obj_names):
                     mesh_smooth_type="FACE",
                     use_mesh_modifiers=True,
                     add_leaf_bones=False,
-                    path_mode="COPY",
-                    embed_textures=True,
+                    # Mesh-only FBX (see _export_fbx) — textures go via the separate export.
+                    path_mode="STRIP",
+                    embed_textures=False,
                 )
             results[name] = filepath
         except Exception as e:

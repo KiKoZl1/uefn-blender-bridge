@@ -37,7 +37,9 @@ PLUGIN_VERSION = "1.0.0"
 DEFAULT_PORT = 8790
 MAX_PORT = 8795
 TICK_BATCH = 5
-HTTP_TIMEOUT = 120.0
+HTTP_TIMEOUT = 600.0   # UEFN-side do_POST deadline; a heavy textured import can take minutes and
+                       # the UEFN import pipeline is single-threaded, so a short deadline 504'd mid-import
+                       # (Blender already waits 600s on the send). Must be >= the Blender send timeout.
 POLL_INTERVAL = 0.02
 STALE_SEC = 120.0
 ACTOR_PREFIX = "BB_"
@@ -263,7 +265,9 @@ def _import_tex(fp, dest, name):
     task.set_editor_property("destination_name", name)
     task.set_editor_property("replace_existing", True)
     task.set_editor_property("automated", True)
-    task.set_editor_property("save", True)
+    # Don't save here — _config_tex sets the right compression/sRGB and saves once. Saving on
+    # import too would write each texture to disk twice (the wrong compression, then the right one).
+    task.set_editor_property("save", False)
     unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
     exp = f"{dest}/{name}"
     if _asset_lib().does_asset_exist(exp):
@@ -315,8 +319,12 @@ def _import_fbx(fbx_path, dest_path, combine=False):
 
     options = unreal.FbxImportUI()
     options.set_editor_property("import_mesh", True)
-    options.set_editor_property("import_textures", True)
-    options.set_editor_property("import_materials", True)
+    # Embedded materials/textures OFF: our MM_/MI_ pipeline rebuilds and assigns every material
+    # from the separate texture export (it was overwriting the embed ones anyway), so importing
+    # them was pure waste — dozens of orphan assets that then cost ~3 min to delete from staging.
+    # Mesh sections (material slots) still come from geometry, so per-slot MI_ assignment is intact.
+    options.set_editor_property("import_textures", False)
+    options.set_editor_property("import_materials", False)
     options.set_editor_property("import_as_skeletal", False)
     options.set_editor_property("import_animations", False)
     options.set_editor_property("automated_import_should_detect_type", False)
@@ -433,8 +441,14 @@ def _spawn_or_reuse(asub, asset, label, guid):
             _log(f"  Spawn failed: {label}", "warning")
             return None
     actor.set_actor_label(label)
+    # Stamp identity tags: GUID (per-object identity) + PROJECT (reliable clean scoping — the
+    # Outliner folder path isn't readable via get_folder_path() in this UEFN build).
+    tags = []
     if guid:
-        actor.tags = [unreal.Name(f"BB_GUID:{guid}")]
+        tags.append(unreal.Name(f"BB_GUID:{guid}"))
+    if _bridge_project:
+        tags.append(unreal.Name(f"BB_PROJECT:{_bridge_project}"))
+    actor.tags = tags
     return actor
 
 
@@ -476,10 +490,21 @@ def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
         _log("  No StaticMeshes to place", "warning")
         return actors
 
+    def _loose(s):   # alphanumeric-only, lowercased — tolerant of any char UE swapped to '_'
+        return "".join(c for c in (s or "").lower() if c.isalnum())
+
     def _resolve(key):
-        k = (key or "").replace(".", "_")
+        # UE sanitizes asset names (spaces/dots -> '_'), so sanitize the query the SAME way —
+        # the old code only handled dots, so a mesh with a SPACE in its name (e.g. "Human
+        # Architecture Building" -> asset "Human_Architecture_Building") never matched and the
+        # object was silently skipped. Loose alphanumeric compare is the final fallback.
+        k = _sanitize_seg(key or "")
         if k in mesh_by_name:
             return k, mesh_by_name[k]
+        lk = _loose(key)
+        for mk, asset in mesh_by_name.items():
+            if _loose(mk) == lk:
+                return mk, asset
         if len(mesh_by_name) == 1:   # combined/single-mesh export fallback
             return next(iter(mesh_by_name.items()))
         return None, None
@@ -513,7 +538,7 @@ def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
             if rk in renamed:
                 asset = renamed[rk]
             else:
-                asset = _ensure_sm_name(asset, mesh_key.replace(".", "_"),
+                asset = _ensure_sm_name(asset, _sanitize_seg(mesh_key),
                                         _collection_folder(_mesh_dir(), collection))
                 renamed[rk] = asset
                 mesh_by_name[rk] = asset
@@ -535,21 +560,43 @@ def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
 # ============================================================
 
 def _cleanup_actors(names=None):
-    """Remove this bridge PROJECT's actors only. SAFETY: scoped to the project's Outliner folder
-    (/BlenderBridge/<project>/...) so it never nukes another .blend project's actors — or any
-    unrelated BB_-named actor. If a folder can't be read, the actor is left alone (never deleted)."""
+    """Remove this bridge PROJECT's actors only — reliably scoped. `get_folder_path()` is NOT
+    exposed in this UEFN build (it returns nothing), which made the old folder-scope match ZERO
+    actors: clean then deleted the assets but left the actors behind, mesh-less, in the Outliner.
+    We now scope by, in order:
+      1. the BB_PROJECT:<project> tag stamped at placement (always readable);
+      2. the actor's StaticMesh living under this project's folder (covers actors placed before
+         tags existed);
+      3. an orphaned bridge actor (BB_ label, mesh already deleted) NOT tagged to another project
+         — junk left by a prior clean; we sweep it so nothing lingers mesh-less.
+    Never touches another .blend project's actors."""
     asub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
-    proj_folder = f"/BlenderBridge/{_bridge_project}" if _bridge_project else "/BlenderBridge"
+    base = _base_dir()
+    proj_tag = f"BB_PROJECT:{_bridge_project}" if _bridge_project else ""
     to_remove = []
     for actor in asub.get_all_level_actors():
         label = actor.get_actor_label()
         if not label or not label.startswith(ACTOR_PREFIX):
             continue
-        try:
-            fp = str(actor.get_folder_path())
-        except Exception:
-            fp = ""
-        if not fp.startswith(proj_folder):
+        tags = [str(t) for t in (actor.tags or [])]
+        mine = False
+        if proj_tag and proj_tag in tags:
+            mine = True
+        else:
+            try:
+                comp = actor.static_mesh_component
+                sm = comp.get_editor_property("static_mesh") if comp else None
+            except Exception:
+                sm = None
+            if sm is not None:
+                try:
+                    mine = str(sm.get_path_name()).startswith(base)
+                except Exception:
+                    mine = False
+            else:
+                # Orphan (mesh gone): mine unless explicitly tagged to a DIFFERENT project.
+                mine = not any(t.startswith("BB_PROJECT:") and t != proj_tag for t in tags)
+        if not mine:
             continue
         if names:
             if label[len(ACTOR_PREFIX):] in names:
@@ -577,6 +624,40 @@ def _cleanup_assets(dest):
 # ============================================================
 # PBR MATERIAL CREATION
 # ============================================================
+
+# Short per-channel codes for shared-master naming (MM_Tex_BC_R, MM_Tex_BC_M_R_S, ...).
+_CH_CODE = {
+    "BaseColor": "BC", "Normal": "N", "Roughness": "R", "Metallic": "M",
+    "Specular": "S", "Emissive": "E", "AO": "AO", "Opacity": "O", "Height": "H",
+}
+_CH_ORDER = ["BaseColor", "Normal", "Roughness", "Metallic", "Specular",
+             "Emissive", "AO", "Opacity", "Height"]
+
+
+def _tex_master_key(channels):
+    """Stable name suffix for the set of channels a textured material uses."""
+    return "_".join(_CH_CODE[c] for c in _CH_ORDER if c in channels and c in _CH_CODE)
+
+
+def _ensure_tex_master(uchan, mel, cache):
+    """ONE shared textured master per DISTINCT channel-set, compiled once and reused by every
+    material with that exact set. This replaces the old per-material `M_<name>` master, which
+    recompiled a shader each time — the ~2-min bottleneck on a real scene. The master's params
+    are channel-generic (T_BaseColor, T_Roughness, ...) so any matching MI_ plugs straight in, and
+    because every MI on a given master overrides EVERY param the master has, there's no
+    default-texture problem. Masters live in the Materials root (shared across collections) and
+    persist across imports (asset-exists dedup)."""
+    cset = frozenset(uchan.keys())
+    if cset in cache:
+        return cache[cset]
+    root = _base_dir("Materials")
+    name = f"MM_Tex_{_tex_master_key(cset)}" if _tex_master_key(cset) else "MM_Tex"
+    mp = f"{root}/{name}"
+    if not _asset_lib().does_asset_exist(mp):
+        mp = _create_parent_material(name, root, uchan, mel) or mp
+    cache[cset] = mp
+    return mp
+
 
 def _create_parent_material(mat_name, dest, textures, mel):
     tools = unreal.AssetToolsHelpers.get_asset_tools()
@@ -883,6 +964,7 @@ def _apply_materials(obj_data, exchange_folder):
 
     mel = unreal.MaterialEditingLibrary
     mi_by_mat = {}
+    tex_master_cache = {}   # channel-set -> shared master path (compile once, reuse for all MI_)
     for mname, chans in mat_tex.items():
         coll = mat_coll.get(mname, "")
         safe = _sanitize_seg(mname)
@@ -902,10 +984,8 @@ def _apply_materials(obj_data, exchange_folder):
                 else:
                     _log(f"    texture import failed: {ch} <- {local}", "warning")
             if uchan:
-                m_path = f"{mat_dest}/M_{safe}"
-                if not _asset_lib().does_asset_exist(m_path):
-                    m_path = _create_parent_material(f"M_{safe}", mat_dest, uchan, mel) or m_path
-                mi_path = _create_mi(f"MI_{safe}", mat_dest, m_path, uchan)
+                master = _ensure_tex_master(uchan, mel, tex_master_cache)
+                mi_path = _create_mi(f"MI_{safe}", mat_dest, master, uchan)
             else:
                 _log(f"  MAT '{mname}': texture imports failed — color fallback", "warning")
                 mi_path = _color_mi(mname, safe, mat_dest, mat_props.get(mname, {}))
@@ -1223,11 +1303,12 @@ def _import_scene_cmd(fbx_path="", scene_name="Scene", objects=None,
     # Place meshes
     actors = _place_meshes(mesh_paths, obj_data, scene_name)
 
-    # Build/assign per-material MM_/MI_ (deduped) in Materials/<collection>, OVER the embed
-    # auto-material. Embed stays as a fallback during validation; disabled once approved.
+    # Build/assign per-material MM_/MI_ (deduped) in Materials/<collection>. The FBX import no
+    # longer brings embed materials, so MI_ is the sole material source (shared textured masters).
     mat_map = _apply_materials(obj_data, exchange_folder)
 
-    # Drop the embed auto-materials left in the staging folder (MI_ now owns the SM slots).
+    # Staging now holds only StaticMeshes (no embed orphans) — meshes move to their collection
+    # folders, so this is a fast no-op / empty-folder drop, not the old ~3-min asset-by-asset purge.
     _clean_staging(mesh_dest)
 
     _imported_scenes[scene_name] = {
