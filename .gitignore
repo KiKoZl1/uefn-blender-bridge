@@ -31,3 +31,6 @@ build/
 *.log
 
 # NOTE: fonts/ IS committed on purpose (bundled OFL brand fonts).
+
+# Internal planning doc — kept local, not published
+PRD.md
