@@ -36,7 +36,7 @@ UEFN_PORT = 8790
 BLENDER_SERVER_PORT = 8791
 BLENDER_MAX_PORT = 8795
 EXCHANGE_DIR = os.path.join(tempfile.gettempdir(), "UEFNBlenderBridge")
-ADDON_VERSION = "1.0.1"
+ADDON_VERSION = "1.0.2"
 
 # ============================================================
 # STATE
@@ -753,9 +753,15 @@ def _export_textures():
                 fmt = img.file_format or "PNG"
                 ext = fmt.lower().replace("jpeg", "jpg")
                 filepath = os.path.join(tex_dir, f"{name}.{ext}")
-                img.filepath_raw = filepath
-                img.file_format = fmt
+                # img.save() writes to filepath_raw, so we must point it at the exchange folder —
+                # but RESTORE the originals afterward. Permanently mutating the user's datablock
+                # would leave their textures pointing at the temp folder (wiped on the next send),
+                # breaking their .blend with pink/missing textures after a save. (Live Sync saves
+                # on Ctrl+S, so this fired constantly.)
+                orig_fp, orig_fmt = img.filepath_raw, img.file_format
                 try:
+                    img.filepath_raw = filepath
+                    img.file_format = fmt
                     img.save()
                 except Exception:
                     try:
@@ -763,6 +769,9 @@ def _export_textures():
                         img.save()
                     except Exception:
                         pass
+                finally:
+                    img.filepath_raw = orig_fp
+                    img.file_format = orig_fmt
                 tex_paths[name] = filepath
 
     return tex_paths
@@ -795,9 +804,12 @@ def _export_textures_for_objects(obj_names):
                     fmt = img.file_format or "PNG"
                     ext = fmt.lower().replace("jpeg", "jpg")
                     filepath = os.path.join(tex_dir, f"{img_name}.{ext}")
-                    img.filepath_raw = filepath
-                    img.file_format = fmt
+                    # Restore the datablock after saving (see _export_textures) — never leave the
+                    # user's image pointing at the temp exchange folder.
+                    orig_fp, orig_fmt = img.filepath_raw, img.file_format
                     try:
+                        img.filepath_raw = filepath
+                        img.file_format = fmt
                         img.save()
                     except Exception:
                         try:
@@ -805,6 +817,9 @@ def _export_textures_for_objects(obj_names):
                             img.save()
                         except Exception:
                             pass
+                    finally:
+                        img.filepath_raw = orig_fp
+                        img.file_format = orig_fmt
                     tex_paths[img_name] = filepath
 
     return tex_paths
@@ -2189,7 +2204,9 @@ _classes = (
     UEFNBRIDGE_PT_main,
     UEFNBRIDGE_PT_connection,
     UEFNBRIDGE_PT_export,
-    UEFNBRIDGE_PT_bake,
+    # UEFNBRIDGE_PT_bake,   # HIDDEN for v1.0.2: the baked import path doesn't apply materials yet
+    #                       (baked actors land untextured) — re-enable once the UEFN side wires
+    #                       _apply_materials into _import_baked_cmd. Operators stay registered.
     UEFNBRIDGE_PT_live,
     UEFNBRIDGE_PT_info,
 )

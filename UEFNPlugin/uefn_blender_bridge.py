@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 # CONFIG
 # ============================================================
 
-PLUGIN_VERSION = "1.0.1"
+PLUGIN_VERSION = "1.0.2"
 DEFAULT_PORT = 8790
 MAX_PORT = 8795
 TICK_BATCH = 5
@@ -159,9 +159,18 @@ def _tex_dir(scene_name=""):
 
 
 def _sanitize_seg(s):
-    """UE asset-path segment: only [A-Za-z0-9_-]; everything else (spaces, dots, etc.) -> '_'.
-    A space or dot in a folder name makes rename_asset fail silently."""
-    return "".join(ch if (ch.isalnum() or ch in "_-") else "_" for ch in s)
+    """UEFN-safe asset/path-segment name. UEFN's content validator is STRICTER than vanilla UE:
+    UE's INVALID_OBJECTNAME_CHARACTERS does NOT list '-', but UEFN rejects it ("Name cannot
+    contain the following characters: -"), and a leading digit is also rejected. So instead of a
+    fragile blacklist we WHITELIST ASCII [A-Za-z0-9_] (the safe intersection, per the Allar UE5
+    Style Guide) — every other char (space, '-', '.', ':', punctuation, non-ASCII) becomes '_' —
+    and never start with a digit. Empty -> 'Unnamed'."""
+    out = "".join(ch if (ch.isascii() and ch.isalnum()) else "_" for ch in (s or ""))
+    if not out:
+        return "Unnamed"
+    if out[0].isdigit():
+        out = "_" + out
+    return out
 
 
 def _collection_folder(root, collection):
@@ -465,6 +474,22 @@ def _apply_obj_transform(actor, od):
     actor.set_folder_path(_outliner_folder(collection))
 
 
+def _enable_nanite(sm):
+    """Enable Nanite on an imported StaticMesh — better UEFN runtime perf and it helps stay under
+    the 100k memory-unit publish gate. Defensive: any API difference on a given build just logs and
+    is ignored, so the mesh always imports even if Nanite can't be set. Applied once per unique
+    mesh (instanced actors share the asset)."""
+    if not sm:
+        return
+    try:
+        ns = sm.get_editor_property("nanite_settings")
+        ns.set_editor_property("enabled", True)
+        sm.set_editor_property("nanite_settings", ns)
+        _asset_lib().save_asset(sm.get_path_name().split(".")[0])
+    except Exception as e:
+        _log(f"  Nanite enable skipped: {e}", "warning")
+
+
 def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
     """Place actors. OBJECT-DRIVEN: each object references a (possibly shared) StaticMesh via its
     'mesh' field — N Blender objects sharing one mesh datablock spawn N actors off ONE imported
@@ -540,6 +565,7 @@ def _place_meshes(asset_paths, object_data=None, scene_name="Scene"):
             else:
                 asset = _ensure_sm_name(asset, _sanitize_seg(mesh_key),
                                         _collection_folder(_mesh_dir(), collection))
+                _enable_nanite(asset)
                 renamed[rk] = asset
                 mesh_by_name[rk] = asset
 
@@ -594,8 +620,13 @@ def _cleanup_actors(names=None):
                 except Exception:
                     mine = False
             else:
-                # Orphan (mesh gone): mine unless explicitly tagged to a DIFFERENT project.
-                mine = not any(t.startswith("BB_PROJECT:") and t != proj_tag for t in tags)
+                # Orphan (no mesh): ONLY ours if it carries a bridge tag (every bridge actor gets a
+                # BB_GUID tag at placement). NEVER delete a BB_-named actor the USER created (a
+                # light/trigger/blueprint they happened to name "BB_*") — it has no bridge tag.
+                # Also skip anything tagged to a different project.
+                has_bridge_tag = any(t.startswith("BB_GUID:") or t.startswith("BB_PROJECT:") for t in tags)
+                other_project = any(t.startswith("BB_PROJECT:") and t != proj_tag for t in tags)
+                mine = has_bridge_tag and not other_project
         if not mine:
             continue
         if names:
@@ -1119,7 +1150,7 @@ def _process_textures(tex_folder, scene_name, tex_dest=None, mat_dest=None):
             fp = os.path.join(tex_folder, fname)
             if not os.path.isfile(fp):
                 continue
-            aname = f"T_{scene_name}_{os.path.splitext(fname)[0]}".replace(" ", "_").replace("-", "_")
+            aname = _sanitize_seg(f"T_{scene_name}_{os.path.splitext(fname)[0]}")
             ap = _import_tex(fp, tex_dest, aname)
             if ap:
                 _config_tex(ap, ch)
@@ -1129,12 +1160,12 @@ def _process_textures(tex_folder, scene_name, tex_dest=None, mat_dest=None):
         if not tex_paths:
             continue
 
-        parent_name = f"M_{scene_name}_{sn}".replace(" ", "_").replace("-", "_")
+        parent_name = _sanitize_seg(f"M_{scene_name}_{sn}")
         parent_path = _create_parent_material(parent_name, mat_dest, tex_paths, mel)
         if not parent_path:
             continue
 
-        mi_name = f"MI_{scene_name}_{sn}".replace(" ", "_").replace("-", "_")
+        mi_name = _sanitize_seg(f"MI_{scene_name}_{sn}")
         mi_path = _create_mi(mi_name, mat_dest, parent_path, tex_paths)
         if mi_path:
             created_mats[sn] = mi_path
@@ -1550,7 +1581,7 @@ def _update_materials_cmd(materials=None, **kw):
             for i in range(max(1, num_mats)):
                 existing = comp.get_material(i)
                 dmi = comp.create_dynamic_material_instance(
-                    i, existing, f"DMI_{obj_name}")
+                    i, existing, _sanitize_seg(f"DMI_{obj_name}"))
                 if not dmi:
                     continue
 
@@ -1608,7 +1639,7 @@ def _update_textures_cmd(object_names=None, exchange_folder="",
         if not fname.lower().endswith((".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tiff", ".exr")):
             continue
         fp = os.path.join(tex_folder, fname)
-        aname = f"T_{scene_name}_{os.path.splitext(fname)[0]}".replace(" ", "_").replace("-", "_")
+        aname = _sanitize_seg(f"T_{scene_name}_{os.path.splitext(fname)[0]}")
         ap = _import_tex(fp, tex_dest, aname)
         if ap:
             ch = _detect_channel(fname)
@@ -2147,7 +2178,7 @@ class Dashboard:
         ft = tk.Frame(self.root, bg=self.BG2, height=24)
         ft.pack(fill="x", side="bottom")
         ft.pack_propagate(False)
-        tk.Label(ft, text="by KiKoZl \u2022 Surprise Co.",
+        tk.Label(ft, text="by KiKoZl - Surprise Co.",
                  font=("Segoe UI", 7), fg="#484f58", bg=self.BG2).pack(side="left", padx=8)
         tk.Label(ft, text="github.com/KiKoZl1",
                  font=("Segoe UI", 7), fg="#484f58", bg=self.BG2).pack(side="right", padx=8)

@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.2] — 2026-06-23
+
+Launch-hardening patch. A pre-launch audit surfaced two data-loss bugs on the
+primary workflows plus two docs claims that overstated the code — all fixed.
+
+### Fixed
+
+- **Texture export no longer rewrites your image paths.** Sending textures used
+  to repoint your Blender image datablocks at a temporary folder (wiped on the
+  next send), which could break the textures in your own `.blend` after a save.
+  The export now writes to the temp folder without mutating your datablocks.
+- **Clean no longer deletes your own `BB_`-named actors.** The orphan sweep now
+  only removes actors that carry a bridge tag, so a light or trigger you happened
+  to name `BB_*` is never touched.
+- **Asset names are fully UEFN-safe.** The sanitizer now whitelists
+  `A-Z a-z 0-9 _` (no `-`, no leading digit, ASCII only), matching UEFN's
+  stricter validator — names like `Roof-tiles` no longer fail import.
+- **UEFN dashboard footer** now renders with the correct branding.
+
+### Added
+
+- **Nanite** is now actually enabled on imported StaticMeshes.
+
+### Changed
+
+- The **Bake & Send** panel is temporarily hidden while its material pipeline is
+  finished (the operators remain, just not surfaced in the UI).
+- Docs corrected: port-retry ranges, version labels, and the scope of the
+  async-send claim.
+
+---
+
 ## [1.0.1] — 2026-06-23
 
 Patch release. The first real, multi-object textured scene test surfaced four
@@ -135,5 +167,7 @@ First public early-access release.
 
 ---
 
+[1.0.2]: https://github.com/KiKoZl1/uefn-blender-bridge/compare/v1.0.1...v1.0.2
+[1.0.1]: https://github.com/KiKoZl1/uefn-blender-bridge/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/KiKoZl1/uefn-blender-bridge/compare/v0.5.0-beta...v1.0.0
 [0.5.0-beta]: https://github.com/KiKoZl1/uefn-blender-bridge/releases/tag/v0.5.0-beta

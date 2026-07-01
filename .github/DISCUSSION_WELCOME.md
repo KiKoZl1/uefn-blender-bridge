@@ -1,13 +1,11 @@
 # 👋 Welcome to UEFN Blender Bridge!
 
 Thanks for stopping by. This is the community hub for the **UEFN Blender
-Bridge** — a live two-way bridge between Blender and Unreal Editor for
-Fortnite.
+Bridge** — a live two-way bridge between Blender and UEFN.
 
-The tool is currently in **early access (v0.5.0-beta)**. Bugs will happen,
-workflows will change, and your feedback will directly shape where this
-goes next. If you're here, you're a founding member of the community — thank
-you 🙏.
+The tool is **stable (v1.0.2)** and open source under MIT. It's young, so your
+feedback will directly shape where it goes next. If you're here early, you're a
+founding member of the community — thank you 🙏.
 
 ## What Discussions are for
 
@@ -51,8 +49,8 @@ Short version: **be kind, be patient, be useful**.
    — you're free to use, modify, and redistribute it, including in commercial
    UEFN projects; just keep the `LICENSE` / attribution. If it helps you, the
    best thanks is a ⭐ and a contribution back.
-5. **Beta software = beta expectations.** Things will break. Report
-   clearly, stay constructive, and we'll fix it together.
+5. **It's young software.** Edge cases will show up. Report clearly, stay
+   constructive, and we'll fix it together.
 
 ## Introduce yourself 👇
 
