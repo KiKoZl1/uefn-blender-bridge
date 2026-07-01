@@ -2,7 +2,7 @@
 
 > The only Blender ↔ UEFN bridge with real two-way live sync. Build in Blender, see it in UEFN — and back again — on every save.
 
-**Status:** `v1.0.0` — stable. See [CHANGELOG.md](CHANGELOG.md).
+**Status:** `v1.0.2` — stable. See [CHANGELOG.md](CHANGELOG.md).
 **License:** [MIT](LICENSE)
 **Made by:** [KiKoZl](https://github.com/KiKoZl1) · [Surprise Co.](https://surpriseugc.com)
 
@@ -26,8 +26,8 @@ machine.
 ## Features
 
 - **Two-way live sync.** `Ctrl+S` in Blender pushes changes to UEFN; `Ctrl+S`
-  in UEFN pushes actor edits back to Blender. The send is async — the Blender
-  UI never freezes.
+  in UEFN pushes actor edits back to Blender. Manual scene sends run off the
+  main thread, so the Blender UI stays responsive.
 - **Data-driven transforms.** The mesh is exported pure (no baked transform);
   the UEFN actor carries the full world location, rotation, and scale. Correct
   for any object — parented, unparented, or scaled.

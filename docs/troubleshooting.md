@@ -32,8 +32,9 @@ This usually means a firewall is blocking `localhost` traffic.
 
 ### Ports already in use
 
-If `8790` or `8791` are taken, the bridge tries `8791..8795` and `8792..8795`
-respectively. If all five fail, you'll see an error in the console.
+If the default ports are taken, the bridge scans a small range: the UEFN side
+tries `8790..8795` and the Blender side tries `8791..8795`. If none are free,
+you'll see an error in the console.
 
 **Fix:**
 - Find what's using the port: `netstat -ano | findstr :8790`
